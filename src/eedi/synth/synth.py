@@ -2,7 +2,7 @@
 合成数据生成模块（复刻 Top-1/2/3 方案的关键差距来源）。
 
 功能：
-1. SynthDataGenerator：用 vLLM（本地 Qwen2.5-32B-AWQ）生成未见错因的 MCQ
+1. SynthDataGenerator：用 vLLM（本地 DeepSeek-R1-Distill-Qwen-32B）生成未见错因的 MCQ
 2. MisconceptionExpander：扩写错因描述（提升 embedding 空间的区分度）
 3. CoTDataGenerator：生成 CoT 推理轨迹（供精排 SFT 和 GRPO 使用）
 4. LLM-as-Judge 质检：过滤低质量合成数据
@@ -79,7 +79,7 @@ class SynthDataGenerator:
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen2.5-32B-Instruct-AWQ",
+        model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
         gpu_memory_utilization: float = 0.80,
         max_model_len: int = 4096,
         cache_dir: Optional[str] = None,
@@ -199,7 +199,7 @@ class MisconceptionExpander:
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen2.5-32B-Instruct-AWQ",
+        model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
         gpu_memory_utilization: float = 0.80,
         cache_dir: Optional[str] = None,
     ) -> None:

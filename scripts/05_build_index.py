@@ -3,7 +3,7 @@
 候选池供阶段3/4 的重排器与 GRPO 训练使用。
 
 用法：
-  python scripts/05_build_index.py --adapter-path outputs/retriever/lora_best --top-k 50
+  python scripts/05_build_index.py --model Qwen/Qwen3-Embedding-8B --adapter-path outputs/retriever/lora_best_8b --top-k 50
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -30,8 +30,8 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="Qwen/Qwen3-Embedding-0.6B")
-    parser.add_argument("--adapter-path", default=str(OUTPUT_DIR / "lora_best"))
+    parser.add_argument("--model", default="Qwen/Qwen3-Embedding-8B")
+    parser.add_argument("--adapter-path", default=str(OUTPUT_DIR / "lora_best_8b"))
     parser.add_argument("--top-k", type=int, default=50)
     args = parser.parse_args()
 

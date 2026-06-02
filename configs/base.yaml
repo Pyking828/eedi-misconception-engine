@@ -17,10 +17,10 @@ paths:
 
 hardware:
   gpu_memory_gb: 96
-  max_gpu_utilization: 0.85   # 护栏：显存超过 85GB 自动降级
+  max_gpu_utilization: 0.92   # 护栏：安全前提下尽量吃满GPU；逼近92GB自动降batch/降并发
   device: cuda
   dtype: bfloat16
-  num_workers: 4
+  num_workers: 8
 
 data:
   train_csv: /root/autodl-tmp/eedi-data/train.csv
@@ -31,10 +31,12 @@ data:
   eval_fold: 0
 
 retriever:
-  model_name: Qwen/Qwen3-Embedding-0.6B
-  backup_model: BAAI/bge-m3
+  # Final 30B以内主线：8B 召回；0.6B 保留为 quick baseline / HF Spaces demo
+  model_name: Qwen/Qwen3-Embedding-8B
+  baseline_model: Qwen/Qwen3-Embedding-0.6B
+  backup_model: Qwen/Qwen3-Embedding-4B
   faiss_index_path: /root/autodl-tmp/eedi-data/faiss_index.bin
-  embed_dim: 1024
+  embed_dim: 4096
   top_k_retrieve: 50          # 召回候选数
   max_seq_len: 512
   batch_size: 64
@@ -57,8 +59,10 @@ retriever:
 
 reranker:
   pointwise:
-    model_name: Qwen/Qwen3-Reranker-0.6B
-    backup_model: BAAI/bge-reranker-v2-m3
+    # Final 30B以内主线：8B reranker；0.6B 保留为快速 baseline
+    model_name: Qwen/Qwen3-Reranker-8B
+    baseline_model: Qwen/Qwen3-Reranker-0.6B
+    backup_model: Qwen/Qwen3-Reranker-4B
     top_k_input: 50
     top_k_output: 10
     max_seq_len: 1024
@@ -70,7 +74,7 @@ reranker:
       learning_rate: 1.0e-4
       per_device_train_batch_size: 4
   listwise:
-    model_name: Qwen/Qwen2.5-3B-Instruct
+    model_name: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
     top_k_input: 10
     top_k_output: 5
     max_new_tokens: 64
@@ -84,21 +88,24 @@ reranker:
       gradient_accumulation_steps: 8
 
 reasoner:
-  model_name: Qwen/Qwen2.5-3B-Instruct
+  model_name: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
   max_new_tokens: 256
   temperature: 0.1
   use_cache: true
   cache_db: /root/autodl-tmp/eedi-data/reasoner_cache.db
 
 synth:
-  teacher_model: Qwen/Qwen2.5-32B-Instruct-AWQ   # ~20GB，默认
-  # teacher_model: Qwen/Qwen2.5-72B-Instruct-AWQ  # ~40GB，确认磁盘充足时启用
-  vllm_gpu_memory_utilization: 0.80
+  # 主线上线模型仍为 14B；32B 只做离线 teacher / judge / distillation，不进入线上服务。
+  teacher_model: deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+  student_reasoner_model: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
+  judge_model: deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+  vllm_gpu_memory_utilization: 0.90
+  max_parallel_generation: 8
   num_synth_per_misconception: 5   # 每条错因生成5道题
   judge_threshold: 6               # LLM-as-judge 0-10 分，≥6 保留
 
 grpo:
-  model_name: Qwen/Qwen2.5-3B-Instruct
+  model_name: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
   lora:
     r: 32
     lora_alpha: 64

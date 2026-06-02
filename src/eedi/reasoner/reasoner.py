@@ -5,7 +5,8 @@
 同时用于合成数据生成（蒸馏教师轨迹）。
 
 设计：
-- 本地模型：Qwen2.5-3B-Instruct（快）
+- 本地主模型：DeepSeek-R1-Distill-Qwen-14B（线上 CoT 推理/精排解释）
+- 离线增强：DeepSeek-R1-Distill-Qwen-32B（teacher/judge/蒸馏，不进线上服务）
 - 结果缓存到 SQLite，避免重复推理
 """
 from __future__ import annotations
@@ -42,7 +43,7 @@ class CoTReasoner:
     生成 CoT 错因推理链，并缓存到 SQLite。
 
     示例：
-        reasoner = CoTReasoner.from_pretrained("Qwen/Qwen2.5-3B-Instruct")
+        reasoner = CoTReasoner.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-14B")
         rationale = reasoner.generate(
             question="What is 5 × 4 + 6 ÷ 2?",
             correct_answer="23",
@@ -102,7 +103,7 @@ class CoTReasoner:
     @classmethod
     def from_pretrained(
         cls,
-        model_name: str = "Qwen/Qwen2.5-3B-Instruct",
+        model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
         adapter_path: Optional[str | Path] = None,
         max_new_tokens: int = 256,
         temperature: float = 0.1,

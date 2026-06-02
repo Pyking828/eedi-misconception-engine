@@ -26,7 +26,7 @@
 | 上游感知记忆 + 下游 mcp/subagent | `memory/`（SQLite）+ `mcp_server/` + `reasoner/`（CoT）|
 | asyncio/fastapi/函数注解 | `service/app.py`（全异步 + pydantic v2 + SSE）|
 | 30B内大模型 SFT + 强化学习（qwen）| LoRA SFT（召回/重排）+ **GRPO** 精排 |
-| 100B+ 大模型做 Agent | 本地 Qwen2.5-32B-AWQ 教师 + MCP/SubAgent 协议 |
+| 30B 内大模型做 Agent | DeepSeek-R1-Distill-Qwen-14B 线上推理/精排 + DeepSeek-R1-Distill-Qwen-32B 离线 teacher/judge/蒸馏增强 |
 
 ---
 
@@ -43,14 +43,14 @@
               │
               ▼
 ┌─────────────────────────────┐
-│  召回 Retriever              │  Qwen3-Embedding-0.6B + LoRA
+│  召回 Retriever              │  Qwen3-Embedding-8B + LoRA
 │  FAISS CPU IndexFlatIP      │  InfoNCE loss + 难负例挖掘
 │  top-50 候选                 │  MAP@25 / Recall@25 / nDCG@25
 └─────────────┬───────────────┘
               │ [置信度低才升级]
               ▼
 ┌─────────────────────────────┐
-│  粗排 Pointwise              │  Qwen3-Reranker-0.6B + LoRA
+│  粗排 Pointwise              │  Qwen3-Reranker-8B + LoRA
 │  top-50 → top-10            │  cross-encoder 打分头
 └─────────────┬───────────────┘
               │
@@ -58,7 +58,7 @@
       │                │
       ▼                ▼
 ┌──────────┐    ┌───────────────────┐
-│ CoT      │    │ 精排 Listwise      │  Qwen2.5-3B + LoRA SFT + GRPO RL
+│ CoT      │    │ 精排 Listwise      │  DeepSeek-R1-Distill-Qwen-14B + LoRA/GRPO
 │ Reasoner │───▶│ top-10 → top-5    │  reward = nDCG@5 增益
 │ SubAgent │    └───────────────────┘
 └──────────┘
@@ -127,13 +127,13 @@ python scripts/01_retriever_baseline.py --fold 0
 
 ```bash
 python scripts/01_retriever_baseline.py --fold 0 --train
-python scripts/05_build_index.py --adapter-path outputs/retriever/lora_best
+python scripts/05_build_index.py --model Qwen/Qwen3-Embedding-8B --adapter-path outputs/retriever/lora_best_8b
 ```
 
 ### 6. 合成数据生成（可选，需要大模型）
 
 ```bash
-python scripts/02_synth_data.py --teacher Qwen/Qwen2.5-32B-Instruct-AWQ --n 5
+python scripts/02_synth_data.py --teacher deepseek-ai/DeepSeek-R1-Distill-Qwen-14B --n 5
 ```
 
 ### 7. 重排训练
@@ -168,9 +168,12 @@ uvicorn service.app:app --host 0.0.0.0 --port 6006
 
 | 阶段 | 方法 | Recall@25 | MAP@25 | nDCG@25 |
 |------|------|-----------|--------|---------|
-| 基线 | Qwen3-Embedding-0.6B 零样本 | - | - | - |
+| 快速基线 | Qwen3-Embedding-0.6B 零样本/LoRA | 0.8146(Fold0) | 0.3172(Fold0) | 0.4280(Fold0) |
+| 最终主线 | Qwen3-Embedding-8B zero-shot | 0.6535(5折均值) | 0.2248(5折均值) | 0.3194(5折均值) |
+| 最终主线 | Qwen3-Embedding-8B LoRA | 0.8822(Fold0) | 0.4012(Fold0) | 0.5102(Fold0) |
+| 候选池 | Qwen3-Embedding-8B LoRA top-50 | **0.9700(Recall@50)** | - | - |
 | 阶段1 | + LoRA + InfoNCE 微调 | - | - | - |
-| 阶段2 | + 合成数据（32B-AWQ 教师） | - | - | - |
+| 阶段2 | + 合成数据（DeepSeek-R1-Distill-Qwen-14B 教师） | - | - | - |
 | 阶段3 | + 粗排 + 精排（SFT）| - | - | - |
 | 阶段4 | + GRPO 强化学习 | - | - | - |
 

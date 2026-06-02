@@ -108,7 +108,8 @@ with gr.Blocks(title="Eedi 错因检索 Demo", theme=gr.themes.Soft()) as demo:
 
     gr.Markdown(
         "---\n"
-        "⚡ **完整版功能**（本地 GPU）：Qwen3-Embedding-0.6B LoRA + 粗排 + GRPO精排 + CoT推理 + FastAPI SSE + MCP"
+        "⚡ **完整版功能**（本地 GPU）：Qwen3-Embedding-8B LoRA + Qwen3-Reranker-8B + "
+        "DeepSeek-R1-Distill-Qwen-14B GRPO精排/CoT推理 + 32B离线teacher/judge + FastAPI SSE + MCP"
     )
 
 if __name__ == "__main__":

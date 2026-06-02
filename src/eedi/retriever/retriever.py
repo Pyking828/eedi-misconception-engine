@@ -1,6 +1,6 @@
 """
 召回器（Bi-Encoder）模块。
-架构：Qwen3-Embedding-0.6B（主）/ bge-m3（备）+ LoRA + InfoNCE / MNRL
+架构：Qwen3-Embedding-8B（最终主线）/ Qwen3-Embedding-0.6B（快速基线）+ LoRA + InfoNCE / MNRL
 向量库：FAISS CPU IndexFlatIP（2587 条 misconception，L2 归一化后等价余弦）
 """
 from __future__ import annotations
@@ -147,7 +147,7 @@ class EediRetriever:
 
     示例：
         retriever = EediRetriever.from_pretrained(
-            model_name="Qwen/Qwen3-Embedding-0.6B",
+            model_name="Qwen/Qwen3-Embedding-8B",
             adapter_path="outputs/retriever/lora",
             index_path="data/faiss_index.bin",
             misc_ids=[0, 1, 2, ...],

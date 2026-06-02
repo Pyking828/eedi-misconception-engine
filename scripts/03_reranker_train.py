@@ -94,7 +94,7 @@ def main():
         from src.eedi.data.collator import RerankCollator
         from transformers import AutoTokenizer
 
-        model_name = "Qwen/Qwen3-Reranker-0.6B"
+        model_name = "Qwen/Qwen3-Reranker-8B"
         tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=HF_CACHE)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -116,7 +116,7 @@ def main():
         from src.eedi.reranker.listwise import ListwiseTrainer
         from trl import SFTConfig, SFTTrainer
 
-        model_name = "Qwen/Qwen2.5-3B-Instruct"
+        model_name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
         misc_texts = {int(r["MisconceptionId"]): r["MisconceptionName"] for r in misc_df.iter_rows(named=True)}
 
         trainer = ListwiseTrainer(

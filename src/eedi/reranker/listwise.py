@@ -1,6 +1,6 @@
 """
 精排器（Listwise Reranker）。
-模型：Qwen2.5-3B-Instruct + LoRA SFT → GRPO RL
+模型：DeepSeek-R1-Distill-Qwen-14B + LoRA SFT → GRPO RL
 方式：一次性输入 top-N 候选，输出排序字母序列（复刻 5th place 方案）
      或直接输出最匹配 misconception 序号（复刻 1st place listwise 思路）
 GRPO reward：nDCG 增益 / top-1 命中率
@@ -81,8 +81,8 @@ class ListwiseReranker:
 
     示例：
         reranker = ListwiseReranker.from_pretrained(
-            model_name="Qwen/Qwen2.5-3B-Instruct",
-            adapter_path="outputs/reranker/listwise/lora_best",
+            model_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+            adapter_path="outputs/reranker/listwise/lora_best_14b",
         )
         ranked_ids = reranker.rerank(query, candidate_ids, misc_texts, top_k=5)
     """

@@ -15,9 +15,10 @@ license: mit
 CPU 版轻量演示，使用 bge-m3 + FAISS 实现零样本错因检索。
 
 完整版（本地 GPU）包含：
-- Qwen3-Embedding-0.6B LoRA 微调召回器
-- Qwen3-Reranker-0.6B 粗排
-- Qwen2.5-3B + GRPO 精排
+- Qwen3-Embedding-8B LoRA 微调召回器
+- Qwen3-Reranker-8B 粗排
+- DeepSeek-R1-Distill-Qwen-14B + GRPO 精排/推理
+- DeepSeek-R1-Distill-Qwen-32B 离线 teacher / judge / 蒸馏增强
 - CoT 推理 SubAgent
 - FastAPI SSE 流式服务
 - MCP Server 接入

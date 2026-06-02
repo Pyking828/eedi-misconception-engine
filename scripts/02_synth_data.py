@@ -1,9 +1,9 @@
 """
-阶段2：合成数据生成（vLLM + 本地 Qwen2.5-32B-AWQ）
-运行：python scripts/02_synth_data.py [--teacher Qwen/Qwen2.5-32B-Instruct-AWQ] [--n 5]
+阶段2：合成数据生成（vLLM + DeepSeek-R1-Distill-Qwen-32B 离线 teacher/judge）
+运行：python scripts/02_synth_data.py [--teacher deepseek-ai/DeepSeek-R1-Distill-Qwen-32B] [--n 5]
 
 耗时预估：
-  - 下载 32B-AWQ 模型：~20GB，约 30-60min（取决于带宽）
+  - 下载 32B bf16 模型：~60-65GB，约数小时到十数小时（取决于 hf-mirror 带宽）
   - 生成 2587*5=12935 条：在 96GB 显卡上约 2-4h
 """
 import sys, os
@@ -26,7 +26,9 @@ HF_CACHE = os.environ.get("HF_HOME", "/root/autodl-tmp/hf_cache")
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--teacher", default="Qwen/Qwen2.5-32B-Instruct-AWQ")
+    parser.add_argument("--teacher", default="deepseek-ai/DeepSeek-R1-Distill-Qwen-32B")
+    parser.add_argument("--student-reasoner", default="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+                        help="后续蒸馏目标模型；本脚本先生成32B教师数据")
     parser.add_argument("--n", type=int, default=5, help="每条错因生成几道题")
     parser.add_argument("--judge-threshold", type=float, default=6.0)
     parser.add_argument("--gpu-util", type=float, default=0.80)

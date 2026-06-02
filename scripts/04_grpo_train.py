@@ -31,7 +31,7 @@ def main():
     parser.add_argument("--reward", choices=["ndcg_gain", "top1_hit"], default="ndcg_gain")
     parser.add_argument("--episodes", type=int, default=500)
     parser.add_argument("--sft-model-path", default=None,
-                        help="SFT 训练后的 checkpoint（默认：Qwen2.5-3B-Instruct 原版）")
+                        help="SFT 训练后的 checkpoint（默认：DeepSeek-R1-Distill-Qwen-14B 原版）")
     args = parser.parse_args()
 
     console.rule("[bold blue]阶段4：GRPO 强化学习")
@@ -62,7 +62,7 @@ def main():
     )
     console.print(f"[cyan]GRPO 训练集：{len(train_dataset)} 条")
 
-    model_path = args.sft_model_path or "Qwen/Qwen2.5-3B-Instruct"
+    model_path = args.sft_model_path or "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
     grpo_output = str(OUTPUT_DIR / "reranker" / "grpo")
 
     run_grpo_training(

@@ -7,7 +7,8 @@
 - 手写实现（src/eedi/retriever/retriever.py 的 InfoNCELoss/last_token_pool）保留作为
   "理解内部原理" 的教学参考
 
-Qwen3-Embedding-0.6B：embed_dim=1024，prompts={'query','document'}
+主线：Qwen3-Embedding-8B（embed_dim=4096，prompts={'query','document'}）
+基线：Qwen3-Embedding-0.6B（embed_dim=1024）
 """
 from __future__ import annotations
 
@@ -81,9 +82,9 @@ class STRetriever:
     生产推理用召回器（service 层使用）。
 
     示例：
-        r = STRetriever.from_pretrained("Qwen/Qwen3-Embedding-0.6B",
+        r = STRetriever.from_pretrained("Qwen/Qwen3-Embedding-8B",
                 index_path="...", misc_ids=[...], misc_texts={...},
-                adapter_path="outputs/retriever/lora_best")
+                adapter_path="outputs/retriever/lora_best_8b")
         ids, scores = r.retrieve("query text", top_k=50)
     """
 

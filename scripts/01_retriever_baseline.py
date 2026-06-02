@@ -2,8 +2,8 @@
 阶段1：召回器零样本基线 + LoRA 微调（sentence-transformers 引擎）
 
 用法：
-  python scripts/01_retriever_baseline.py --fold 0                 # 零样本基线
-  python scripts/01_retriever_baseline.py --fold 0 --train         # LoRA 微调
+  python scripts/01_retriever_baseline.py --fold 0 --model Qwen/Qwen3-Embedding-8B         # 最终主线零样本
+  python scripts/01_retriever_baseline.py --fold 0 --train --model Qwen/Qwen3-Embedding-8B # 最终主线 LoRA
   python scripts/01_retriever_baseline.py --all-folds              # 全5折零样本
 """
 import sys, os
@@ -112,6 +112,8 @@ def run_lora_train(model_name, fold, epochs, batch_size, lr):
     console.print(f"  训练对: {len(train_ds)}")
 
     model = load_st_model(model_name, cache_dir=HF_CACHE)
+    # Eedi query 较短，限制 max_seq_length 可以显著降低激活显存，避免默认 32K 上下文误伤。
+    model.max_seq_length = 512
 
     # 注入 LoRA
     lora_cfg = LoraConfig(
@@ -120,6 +122,11 @@ def run_lora_train(model_name, fold, epochs, batch_size, lr):
         bias="none", task_type="FEATURE_EXTRACTION",
     )
     model[0].auto_model.add_adapter(lora_cfg)
+    # 安全前提下尽量提高 batch；gradient checkpointing 用计算换显存，适合 8B/14B LoRA。
+    if hasattr(model[0].auto_model, "gradient_checkpointing_enable"):
+        model[0].auto_model.gradient_checkpointing_enable()
+    if hasattr(model[0].auto_model.config, "use_cache"):
+        model[0].auto_model.config.use_cache = False
     console.print("  LoRA adapter 已注入")
 
     # MNRL = in-batch InfoNCE 对比损失
@@ -145,8 +152,13 @@ def run_lora_train(model_name, fold, epochs, batch_size, lr):
     train_time = time.time() - t0
     console.print(f"  训练耗时: {train_time:.0f}s")
 
-    # 保存 LoRA adapter
-    adapter_dir = OUTPUT_DIR / "lora_best"
+    # 保存 LoRA adapter。0.6B baseline 与 8B final mainline 分开，避免后续索引脚本读错。
+    if "Qwen3-Embedding-8B" in model_name:
+        adapter_dir = OUTPUT_DIR / "lora_best_8b"
+    elif "Qwen3-Embedding-0.6B" in model_name:
+        adapter_dir = OUTPUT_DIR / "lora_best_0_6b"
+    else:
+        adapter_dir = OUTPUT_DIR / "lora_best"
     model[0].auto_model.save_pretrained(str(adapter_dir))
     console.print(f"  [green]✓ adapter 保存: {adapter_dir}")
 
@@ -158,7 +170,7 @@ def run_lora_train(model_name, fold, epochs, batch_size, lr):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="Qwen/Qwen3-Embedding-0.6B")
+    parser.add_argument("--model", default="Qwen/Qwen3-Embedding-8B")
     parser.add_argument("--fold", type=int, default=0)
     parser.add_argument("--all-folds", action="store_true")
     parser.add_argument("--train", action="store_true")

@@ -1,6 +1,6 @@
 """
 粗排器（Pointwise Cross-Encoder）。
-模型：Qwen3-Reranker-0.6B / bge-reranker-v2-m3
+模型：Qwen3-Reranker-8B（最终主线）/ Qwen3-Reranker-0.6B（快速基线）
 输入：(query, candidate_misconception) → 相似度标量
 训练：LoRA + BCE / MSE loss
 推理：对召回的 top-50 逐一打分 → 取 top-10
@@ -47,8 +47,8 @@ class PointwiseReranker:
 
     示例：
         reranker = PointwiseReranker.from_pretrained(
-            model_name="Qwen/Qwen3-Reranker-0.6B",
-            adapter_path="outputs/reranker/pointwise/lora_best",
+            model_name="Qwen/Qwen3-Reranker-8B",
+            adapter_path="outputs/reranker/pointwise/lora_best_8b",
         )
         ranked_ids = reranker.rerank(query, candidate_ids, misc_texts, top_k=10)
     """
