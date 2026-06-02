@@ -151,20 +151,37 @@ pip install huggingface_hub[cli] -q --cache-dir /root/autodl-tmp/pip_cache
 
 ## 阶段 1：召回器（Retriever）
 
-（待填入）
+引擎：sentence-transformers（稳健，原生支持 Qwen3-Embedding 的 last-token pooling + query/document 指令）
+模型：Qwen/Qwen3-Embedding-0.6B（dim=1024）
 
-### 基线结果
+### 零样本基线（5折平均）
 
-| 模型 | Recall@25 | MAP@25 | 耗时 |
-|------|-----------|--------|------|
-| Qwen3-Embedding-0.6B（零样本） | - | - | - |
-| bge-m3（零样本） | - | - | - |
+| 指标 | 值 |
+|------|-----|
+| MAP@25 | 0.2053 |
+| Recall@25 | 0.6087 |
+| Recall@10 | 0.4499 |
+| nDCG@25 | 0.2939 |
 
-### 微调后结果
+各折：Fold0 MAP@25=0.2038 / F1=0.1958 / F2=0.2154 / F3=0.2143 / F4=0.1972
 
-| 模型 | 方法 | Recall@25 | MAP@25 | 增益 | 耗时 |
-|------|------|-----------|--------|------|------|
-| Qwen3-Embedding-0.6B | LoRA+InfoNCE | - | - | - | - |
+### LoRA 微调结果（Fold 0，MultipleNegativesRankingLoss = in-batch InfoNCE）
+
+| 指标 | 零样本 | LoRA微调 | 绝对增益 | 相对增益 |
+|------|--------|---------|---------|---------|
+| **MAP@25** | 0.2038 | **0.3172** | +0.1134 | **+55.6%** |
+| Recall@25 | 0.5984 | **0.8146** | +0.2162 | +36.1% |
+| Recall@10 | 0.4439 | **0.6407** | +0.1968 | +44.3% |
+| nDCG@25 | 0.2907 | **0.4280** | +0.1373 | +47.2% |
+
+**超参**：LoRA r=16/α=32，target=q/k/v/o_proj，lr=2e-4，2 epochs，batch=32，bf16
+**训练耗时**：仅 **56 秒**（0.6B + LoRA，96GB 显卡）；训练吞吐 125 样本/秒
+**train_loss**：0.863 → 0.39（收敛良好）
+
+**关键经验（面试）**：
+- 召回是天花板：Recall@25 决定了重排能达到的上限。微调把 Recall@25 从 0.60→0.81，给后续重排留出充足空间
+- MNRL（in-batch 对比学习）在 batch=32 时每个正例有 31 个 in-batch 负例，无需显式难负例即可大幅提升
+- 0.6B 小模型 + LoRA 即可获得 +55% 增益，验证了"小模型+强工程"路线的有效性（契合效率赛道思路）
 
 ---
 
@@ -214,7 +231,17 @@ pip install huggingface_hub[cli] -q --cache-dir /root/autodl-tmp/pip_cache
 
 | # | 问题 | 原因 | 解决 | 收益 |
 |---|------|------|------|------|
-| 1 | | | | |
+| 1 | kaggle download 卡死 | GCS(storage.googleapis.com)被墙 | 改用 hf-mirror 的 cdtmc/eedi-ir | 数据2.5s就绪 |
+| 2 | huggingface.co 超时 | 直连被墙 | export HF_ENDPOINT=hf-mirror.com | 模型可下载 |
+| 3 | 模型下载卡在1.1G | 残留进程锁+连接停滞 | 杀进程清锁，hf download CLI 断点续传 | 下载完成 |
+| 4 | bitsandbytes 加载失败 | 缺 libnvJitLink.so.13(CUDA13库,torch用cu128) | 不影响 bf16 LoRA（96GB无需量化），QLoRA 需要时再修复 | 不阻塞 |
+
+### bitsandbytes 修复方案（如需 QLoRA 时）
+```bash
+# 方案1：装 CUDA13 的 nvjitlink
+pip install nvidia-nvjitlink-cu13
+# 方案2：软链到现有 cu12 版本
+# 当前用 bf16 LoRA 无需 bnb，故暂不处理
 
 ---
 
