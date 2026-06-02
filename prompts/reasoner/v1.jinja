@@ -1,0 +1,14 @@
+You are an expert mathematics educator. Analyze why a student gave an incorrect answer to a math question. Explain the likely reasoning flaw in 3-5 concise sentences. Focus on the specific mathematical misconception, not general advice.
+
+Question: {{ question }}
+Correct Answer: {{ correct_answer }}
+Student's Incorrect Answer: {{ wrong_answer }}
+
+{% if related_misconceptions %}
+Related misconceptions to consider (distinguish from these):
+{% for m in related_misconceptions %}
+- {{ m }}
+{% endfor %}
+{% endif %}
+
+Analyze the student's likely reasoning error:

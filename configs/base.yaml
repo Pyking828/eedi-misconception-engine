@@ -1,0 +1,129 @@
+# ============================================================
+# Eedi Misconception Engine — Base Configuration
+# ============================================================
+
+project:
+  name: eedi-misconception-engine
+  version: "0.1.0"
+  seed: 42
+
+paths:
+  root: /root/autodl-tmp/eedi-misconception-engine
+  data: /root/autodl-tmp/eedi-data
+  models: /root/autodl-tmp/models
+  hf_cache: /root/autodl-tmp/hf_cache
+  outputs: /root/autodl-tmp/eedi-misconception-engine/outputs
+  logs: /root/autodl-tmp/eedi-misconception-engine/logs
+
+hardware:
+  gpu_memory_gb: 96
+  max_gpu_utilization: 0.85   # 护栏：显存超过 85GB 自动降级
+  device: cuda
+  dtype: bfloat16
+  num_workers: 4
+
+data:
+  train_csv: /root/autodl-tmp/eedi-data/train.csv
+  misconception_csv: /root/autodl-tmp/eedi-data/misconception_mapping.csv
+  test_csv: /root/autodl-tmp/eedi-data/test.csv
+  folds_path: /root/autodl-tmp/eedi-data/folds.parquet
+  n_folds: 5
+  eval_fold: 0
+
+retriever:
+  model_name: Qwen/Qwen3-Embedding-0.6B
+  backup_model: BAAI/bge-m3
+  faiss_index_path: /root/autodl-tmp/eedi-data/faiss_index.bin
+  embed_dim: 1024
+  top_k_retrieve: 50          # 召回候选数
+  max_seq_len: 512
+  batch_size: 64
+  # LoRA 微调参数
+  lora:
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  # 训练参数
+  train:
+    num_epochs: 3
+    learning_rate: 2.0e-4
+    per_device_train_batch_size: 8
+    gradient_accumulation_steps: 4
+    warmup_ratio: 0.05
+    loss: infonce             # infonce | mnrl
+    temperature: 0.02
+    hard_neg_per_pos: 8
+
+reranker:
+  pointwise:
+    model_name: Qwen/Qwen3-Reranker-0.6B
+    backup_model: BAAI/bge-reranker-v2-m3
+    top_k_input: 50
+    top_k_output: 10
+    max_seq_len: 1024
+    lora:
+      r: 16
+      lora_alpha: 32
+    train:
+      num_epochs: 3
+      learning_rate: 1.0e-4
+      per_device_train_batch_size: 4
+  listwise:
+    model_name: Qwen/Qwen2.5-3B-Instruct
+    top_k_input: 10
+    top_k_output: 5
+    max_new_tokens: 64
+    lora:
+      r: 32
+      lora_alpha: 64
+    train:
+      num_epochs: 2
+      learning_rate: 5.0e-5
+      per_device_train_batch_size: 2
+      gradient_accumulation_steps: 8
+
+reasoner:
+  model_name: Qwen/Qwen2.5-3B-Instruct
+  max_new_tokens: 256
+  temperature: 0.1
+  use_cache: true
+  cache_db: /root/autodl-tmp/eedi-data/reasoner_cache.db
+
+synth:
+  teacher_model: Qwen/Qwen2.5-32B-Instruct-AWQ   # ~20GB，默认
+  # teacher_model: Qwen/Qwen2.5-72B-Instruct-AWQ  # ~40GB，确认磁盘充足时启用
+  vllm_gpu_memory_utilization: 0.80
+  num_synth_per_misconception: 5   # 每条错因生成5道题
+  judge_threshold: 6               # LLM-as-judge 0-10 分，≥6 保留
+
+grpo:
+  model_name: Qwen/Qwen2.5-3B-Instruct
+  lora:
+    r: 32
+    lora_alpha: 64
+  train:
+    num_episodes: 500
+    learning_rate: 1.0e-5
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 8
+    reward: ndcg_gain           # ndcg_gain | top1_hit
+
+router:
+  subject_classifier: keyword    # keyword | embedding
+  cost_threshold: 0.7           # 召回置信度低于此值才升级到重排
+  enable_memory: true
+
+memory:
+  db_path: /root/autodl-tmp/eedi-data/memory.db
+  cache_ttl_hours: 24
+
+service:
+  host: 0.0.0.0
+  port: 6006
+  workers: 1
+  log_level: info
+
+eval:
+  metrics: [map_at_25, recall_at_25, recall_at_10, ndcg_at_25]
+  report_path: /root/autodl-tmp/eedi-misconception-engine/outputs/eval_report.json

@@ -1,0 +1,62 @@
+# ─── 模型权重（禁止提交）───────────────────────────
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.gguf
+
+# ─── 数据集（不提交，用 README 说明下载方式）──────────
+/data/
+eedi-data/
+*.csv
+*.parquet
+*.jsonl
+*.json.gz
+
+# ─── 密钥 & 凭证（严格禁止）──────────────────────────
+.env
+*.env
+kaggle.json
+*.pem
+*.key
+*token*
+*secret*
+*credential*
+
+# ─── 输出 & 缓存 ──────────────────────────────────────
+outputs/
+logs/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ─── 编辑器 ───────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# ─── 虚拟环境 ────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ─── HuggingFace / wandb 缓存 ────────────────────────
+hf_cache/
+wandb/
+runs/
+
+# ─── 临时文件 ────────────────────────────────────────
+*.tmp
+*.log
+tmp/

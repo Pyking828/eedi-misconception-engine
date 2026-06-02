@@ -1,0 +1,16 @@
+You are an expert mathematics educator. Given a student's incorrect answer and a list of candidate misconceptions, rank the candidates from most to least likely to explain the error. Output ONLY a comma-separated list of the candidate letters (e.g. 'A, C, B, D'), from most relevant to least relevant.
+
+Question context:
+{{ query }}
+
+{% if cot_rationale %}
+Student reasoning analysis:
+{{ cot_rationale }}
+
+{% endif %}
+Candidate misconceptions:
+{% for candidate in candidates %}
+{{ loop.index | replace('1','A') | replace('2','B') | replace('3','C') | replace('4','D') | replace('5','E') | replace('6','F') | replace('7','G') | replace('8','H') | replace('9','I') | replace('10','J') }}. {{ candidate }}
+{% endfor %}
+
+Rank the candidates (most to least likely):

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install dependencies (CPU-only, no torch CUDA)
+        run: |
+          pip install -q ruff black pytest pytest-asyncio
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q transformers peft accelerate datasets sentence-transformers
+          pip install -q faiss-cpu polars scikit-learn numpy scipy
+          pip install -q fastapi uvicorn pydantic sse-starlette gradio aiofiles aiosqlite
+          pip install -q omegaconf hydra-core jinja2 rich tqdm trl
+
+      - name: Lint with ruff
+        run: |
+          ruff check src/ eval/ service/ mcp_server/ scripts/ tests/ || true
+
+      - name: Format check with ruff
+        run: |
+          ruff format --check src/ eval/ service/ mcp_server/ || true
+
+      - name: Run smoke tests (no GPU, no Kaggle data)
+        run: |
+          pytest tests/test_evaluator.py tests/test_router.py tests/test_listwise.py \
+            -v --tb=short
+
+      - name: Check import sanity
+        run: |
+          python -c "
+          from eval.evaluator import EediEvaluator
+          from src.eedi.router.router import QueryRouter, PipelineMode
+          from src.eedi.reranker.listwise import parse_listwise_output
+          print('All imports OK')
+          "
