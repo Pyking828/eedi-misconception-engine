@@ -1,29 +1,32 @@
 """
-Eedi 数据加载、长表转换、5 折 CV 构建。
-原始数据格式（宽表）：每行一道题，含 QuestionId / ConstructName / SubjectName /
-QuestionText / CorrectAnswer / AnswerA-D / MisconceptionA-D。
-长表（每行一个 distractor）：QuestionId_Answer 为主键。
+Eedi data loading, wide-to-long conversion, and 5-fold CV.
+
+Wide table: one row per question (QuestionId, ConstructName, SubjectName,
+QuestionText, CorrectAnswer, AnswerA-D, MisconceptionA-D).
+Long table: one row per distractor; primary key QuestionId_Answer.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import numpy as np
 import polars as pl
 from sklearn.model_selection import GroupKFold
 
+if TYPE_CHECKING:
+    from datasets import Dataset
 
 # ─────────────────────────────────────────────
-# 1. 原始数据加载
+# 1. Raw data loading
 # ─────────────────────────────────────────────
+
 
 def load_raw_data(
     data_dir: str | Path,
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-    """返回 (train_df, misconception_df, test_df)（polars DataFrame）。"""
+    """Return (train_df, misconception_df, test_df) as polars DataFrames."""
     data_dir = Path(data_dir)
     train_df = pl.read_csv(data_dir / "train.csv")
     misconception_df = pl.read_csv(data_dir / "misconception_mapping.csv")
@@ -32,8 +35,9 @@ def load_raw_data(
 
 
 # ─────────────────────────────────────────────
-# 2. 宽表 → 长表转换
+# 2. Wide → long table
 # ─────────────────────────────────────────────
+
 
 def build_long_table(
     df: pl.DataFrame,
@@ -41,9 +45,9 @@ def build_long_table(
     include_correct: bool = False,
 ) -> pl.DataFrame:
     """
-    把宽表（每题一行）展开为长表（每个 distractor 一行）。
+    Expand wide table (one row per question) to long (one row per distractor).
 
-    输出列：
+    Output columns:
         QuestionId, QuestionId_Answer, SubjectName, ConstructName,
         QuestionText, CorrectAnswerText, WrongAnswerText,
         MisconceptionId, MisconceptionName, AllText
@@ -70,7 +74,8 @@ def build_long_table(
                     "SubjectName": row.get("SubjectName", ""),
                     "ConstructName": row.get("ConstructName", ""),
                     "QuestionText": row.get("QuestionText", ""),
-                    "CorrectAnswerText": row.get(f"Answer{correct_ans}Text") or row.get(f"Answer{correct_ans}", ""),
+                    "CorrectAnswerText": row.get(f"Answer{correct_ans}Text")
+                    or row.get(f"Answer{correct_ans}", ""),
                     "WrongAnswerText": answer_text,
                     "MisconceptionId": int(misc_id) if misc_id == misc_id else -1,
                 }
@@ -78,7 +83,7 @@ def build_long_table(
 
     long_df = pl.DataFrame(rows)
 
-    # 关联 MisconceptionName
+    # Join MisconceptionName
     misc_map = {
         int(r["MisconceptionId"]): r["MisconceptionName"]
         for r in misconception_df.iter_rows(named=True)
@@ -89,14 +94,23 @@ def build_long_table(
         .alias("MisconceptionName")
     )
 
-    # 构建 AllText（模型输入的统一文本）
+    # Build AllText (unified model input)
     long_df = long_df.with_columns(
         (
-            "Subject: " + pl.col("SubjectName") + "\n"
-            + "Topic: " + pl.col("ConstructName") + "\n"
-            + "Question: " + pl.col("QuestionText") + "\n"
-            + "Correct Answer: " + pl.col("CorrectAnswerText") + "\n"
-            + "Incorrect Answer: " + pl.col("WrongAnswerText")
+            "Subject: "
+            + pl.col("SubjectName")
+            + "\n"
+            + "Topic: "
+            + pl.col("ConstructName")
+            + "\n"
+            + "Question: "
+            + pl.col("QuestionText")
+            + "\n"
+            + "Correct Answer: "
+            + pl.col("CorrectAnswerText")
+            + "\n"
+            + "Incorrect Answer: "
+            + pl.col("WrongAnswerText")
         ).alias("AllText")
     )
 
@@ -104,18 +118,19 @@ def build_long_table(
 
 
 # ─────────────────────────────────────────────
-# 3. 5 折 CV 构建
+# 3. 5-fold CV
 # ─────────────────────────────────────────────
+
 
 def build_cv_folds(
     long_df: pl.DataFrame,
     n_folds: int = 5,
     seed: int = 42,
-    save_path: Optional[str | Path] = None,
+    save_path: str | Path | None = None,
 ) -> pl.DataFrame:
     """
-    按 QuestionId 做 GroupKFold，保证同一道题的所有 distractor 在同一折。
-    返回带 fold 列的 long_df。
+    GroupKFold by QuestionId so all distractors for a question share a fold.
+    Returns long_df with a fold column.
     """
     question_ids = long_df["QuestionId"].to_numpy()
     dummy_X = np.zeros(len(long_df))
@@ -140,17 +155,18 @@ def load_folds(folds_path: str | Path) -> pl.DataFrame:
 
 
 # ─────────────────────────────────────────────
-# 4. PyTorch Dataset 封装
+# 4. PyTorch Dataset wrapper
 # ─────────────────────────────────────────────
+
 
 class EediDataset:
     """
-    通用 Dataset，支持召回器/重排器的不同输入格式。
+    Generic dataset for retriever / reranker modes.
 
     mode:
-        'retriever'  → 返回 (query_text, pos_text, neg_texts)
-        'pointwise'  → 返回 (query_text, candidate_text, label)
-        'listwise'   → 返回 (query_text, [candidate_texts], correct_rank)
+        'retriever'  → (query_text, pos_text, neg_texts)
+        'pointwise'  → (query_text, candidate_text, label)
+        'listwise'   → (query_text, [candidate_texts], correct_rank)
     """
 
     def __init__(
@@ -159,15 +175,15 @@ class EediDataset:
         misconception_df: pl.DataFrame,
         mode: str = "retriever",
         neg_per_pos: int = 8,
-        hard_neg_ids: Optional[dict[str, list[int]]] = None,
-        fold: Optional[int] = None,
+        hard_neg_ids: dict[str, list[int]] | None = None,
+        fold: int | None = None,
         split: str = "train",
     ) -> None:
         self.mode = mode
         self.neg_per_pos = neg_per_pos
         self.hard_neg_ids = hard_neg_ids or {}
 
-        # 折过滤
+        # Fold filter
         if fold is not None:
             if split == "train":
                 df = long_df.filter(pl.col("fold") != fold)
@@ -176,10 +192,10 @@ class EediDataset:
         else:
             df = long_df
 
-        # 只保留有标注的行
+        # Rows with gold labels only
         self.df = df.filter(pl.col("MisconceptionId") >= 0)
 
-        # misconception 查找表
+        # Misconception lookup
         self.misc_texts: dict[int, str] = {
             int(r["MisconceptionId"]): r["MisconceptionName"]
             for r in misconception_df.iter_rows(named=True)
@@ -197,13 +213,15 @@ class EediDataset:
         pos_text = self.misc_texts[pos_id]
 
         if self.mode == "retriever":
-            # 难负例优先，其次随机负例
+            # Hard negatives first, then random
             qa_key = row["QuestionId_Answer"]
             if qa_key in self.hard_neg_ids:
                 neg_pool = [i for i in self.hard_neg_ids[qa_key] if i != pos_id]
             else:
                 neg_pool = [i for i in self.misc_ids if i != pos_id]
-            neg_ids = self.rng.choice(neg_pool, size=min(self.neg_per_pos, len(neg_pool)), replace=False)
+            neg_ids = self.rng.choice(
+                neg_pool, size=min(self.neg_per_pos, len(neg_pool)), replace=False
+            )
             neg_texts = [self.misc_texts[i] for i in neg_ids]
             return {"query": query, "pos": pos_text, "negs": neg_texts, "pos_id": pos_id}
 
@@ -215,8 +233,9 @@ class EediDataset:
 
         raise ValueError(f"Unknown mode: {self.mode}")
 
-    def to_hf_dataset(self):
-        """转为 HuggingFace Dataset，供 SFTTrainer/GRPOTrainer 使用。"""
+    def to_hf_dataset(self) -> Dataset:
+        """Convert to HuggingFace Dataset for SFTTrainer/GRPOTrainer."""
         from datasets import Dataset
+
         records = [self[i] for i in range(len(self))]
         return Dataset.from_list(records)

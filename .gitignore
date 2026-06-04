@@ -18,6 +18,7 @@ eedi-data/
 # ─── 密钥 & 凭证（严格禁止）──────────────────────────
 .env
 *.env
+HF_TOKEN
 kaggle.json
 *.pem
 *.key
@@ -40,6 +41,7 @@ build/
 .eggs/
 
 # ─── 编辑器 ───────────────────────────────────────────
+.cursor/
 .vscode/
 .idea/
 *.swp
@@ -60,3 +62,8 @@ runs/
 *.tmp
 *.log
 tmp/
+
+# ─── 例外：HF Spaces demo 需要的小体积资产必须入库 ────────
+!spaces/misconceptions.txt
+!spaces/misconception_ids.json
+!spaces/misc_embs_bge_m3.npy

@@ -1,4 +1,4 @@
-.PHONY: install install-dev lint format test smoke serve mcp-config clean
+.PHONY: install install-dev lint format test smoke serve mcp-config clean precommit track prepare-data train-retriever synth-data train-reranker ensemble train-grpo unseen-eval
 
 PYTHON := python
 PIP := pip
@@ -27,25 +27,38 @@ smoke:
 	@echo "=== 冒烟测试：不依赖 Kaggle 数据 ==="
 	pytest tests/test_evaluator.py tests/test_router.py tests/test_listwise.py -v
 
-# ─── 数据准备（需要先下载 Kaggle 数据）──────────────────
-eda:
-	$(PYTHON) scripts/00_eda.py
+# ─── 提交前钩子 & 实验跟踪 ──────────────────────────────
+precommit:
+	pre-commit install && pre-commit run --all-files
+
+track:
+	$(PYTHON) scripts/trackio_log.py   # 记录指标历程到 Trackio，trackio show 查看
+
+# ─── 数据准备（从 HF 镜像拉取并转换）────────────────────
+prepare-data:
+	HF_ENDPOINT=https://hf-mirror.com $(PYTHON) scripts/prepare_data.py
 
 build-index:
-	$(PYTHON) scripts/05_build_index.py
+	$(PYTHON) scripts/build_index.py --adapter-path outputs/retriever/lora_best_8b --top-k 50
 
 # ─── 训练（按阶段）──────────────────────────────────────
 train-retriever:
-	$(PYTHON) scripts/01_retriever_baseline.py --train --fold 0
+	$(PYTHON) scripts/retriever_baseline.py --train --fold 0
 
 synth-data:
-	$(PYTHON) scripts/02_synth_data.py --n 5
+	$(PYTHON) scripts/synth_data.py --model r1-32b --per-mis 7 --limit-mis 0
 
 train-reranker:
-	$(PYTHON) scripts/03_reranker_train.py --stage both --fold 0
+	$(PYTHON) scripts/reranker_pointwise_train.py --fold 0
+
+ensemble:
+	$(PYTHON) scripts/reranker_ensemble.py --scores outputs/reranker/scores_best31k_baselinepool_fold0_val.json outputs/reranker/scores_hn12_baselinepool_fold0_val.json --mode both
 
 train-grpo:
-	$(PYTHON) scripts/04_grpo_train.py --reward ndcg_gain
+	$(PYTHON) scripts/grpo_listwise.py --reward ndcg --steps 400
+
+unseen-eval:
+	$(PYTHON) scripts/unseen_eval.py
 
 # ─── 服务 ────────────────────────────────────────────
 serve:

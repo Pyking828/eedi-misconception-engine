@@ -1,6 +1,6 @@
-"""单元测试：listwise 解析"""
-import pytest
-from src.eedi.reranker.listwise import parse_listwise_output, build_listwise_prompt
+"""Unit tests: listwise parsing"""
+
+from src.eedi.reranker.listwise import build_listwise_prompt, parse_listwise_output
 
 
 def test_parse_perfect():
@@ -15,7 +15,7 @@ def test_parse_partial():
     result = parse_listwise_output("B, A", 4)
     assert result[0] == 1
     assert result[1] == 0
-    assert set(result) == {0, 1, 2, 3}  # 补全未出现的
+    assert set(result) == {0, 1, 2, 3}  # pad missing ranks
 
 
 def test_parse_with_noise():

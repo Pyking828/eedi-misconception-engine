@@ -1,7 +1,7 @@
-"""单元测试：智能路由"""
+"""Unit tests: query router"""
+
 import pytest
-import asyncio
-from src.eedi.router.router import QueryRouter, PipelineMode, SubjectCategory
+from src.eedi.router.router import PipelineMode, QueryRouter, SubjectCategory
 
 
 @pytest.mark.asyncio
@@ -21,7 +21,7 @@ async def test_low_confidence_full_pipeline():
 @pytest.mark.asyncio
 async def test_medium_confidence_retrieve_rerank():
     # confidence = min(1.0, top1 * (1 + gap)) = min(1.0, 0.82 * (1 + 0.32)) = min(1.0, 1.082) = 1.0 → RETRIEVE_ONLY
-    # 需要构造一个 gap 小、置信度在 [0.7, 0.9) 的场景
+    # gap small enough for confidence in [0.7, 0.9)
     router = QueryRouter(cost_threshold=0.7, high_confidence_threshold=0.90)
     # top1=0.75, gap=0.05 → confidence = 0.75 * 1.05 = 0.7875 → RETRIEVE_RERANK
     decision = await router.route("Solve x + 1 = 2", "q3", retriever_scores=[0.75, 0.70])

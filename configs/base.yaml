@@ -35,6 +35,9 @@ retriever:
   model_name: Qwen/Qwen3-Embedding-8B
   baseline_model: Qwen/Qwen3-Embedding-0.6B
   backup_model: Qwen/Qwen3-Embedding-4B
+  # 生产推理：多阶段(合成预训→真实微调)最优 adapter，与 faiss 索引一致
+  adapter_path: /root/autodl-tmp/eedi-misconception-engine/outputs/retriever/lora_best_8b
+  misc_ids_path: /root/autodl-tmp/eedi-misconception-engine/outputs/retriever/misc_ids.json
   faiss_index_path: /root/autodl-tmp/eedi-data/faiss_index.bin
   embed_dim: 4096
   top_k_retrieve: 50          # 召回候选数
@@ -63,9 +66,11 @@ reranker:
     model_name: Qwen/Qwen3-Reranker-8B
     baseline_model: Qwen/Qwen3-Reranker-0.6B
     backup_model: Qwen/Qwen3-Reranker-4B
+    # 生产推理：最优 pointwise adapter（yes/no logit 法，fold0 MAP@25=0.5700）
+    adapter_path: /root/autodl-tmp/eedi-misconception-engine/outputs/reranker/manual_lora/manual_lora_fold0_n31464_bs4_hn8_len768
     top_k_input: 50
     top_k_output: 10
-    max_seq_len: 1024
+    max_seq_len: 768
     lora:
       r: 16
       lora_alpha: 32

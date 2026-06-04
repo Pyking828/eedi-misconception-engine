@@ -1,27 +1,24 @@
 """
-推理 Subagent（CoT Reasoner）。
-功能：给定题目 + 学生错误选项，生成"为什么学生会犯这个错误"的推理链。
-生成的 CoT 注入给精排器（listwise），提升重排精度（复刻第1名方案）。
-同时用于合成数据生成（蒸馏教师轨迹）。
+CoT reasoner subagent.
 
-设计：
-- 本地主模型：DeepSeek-R1-Distill-Qwen-14B（线上 CoT 推理/精排解释）
-- 离线增强：DeepSeek-R1-Distill-Qwen-32B（teacher/judge/蒸馏，不进线上服务）
-- 结果缓存到 SQLite，避免重复推理
+Given question + wrong answer, generates why the student likely erred.
+CoT is fed to listwise reranker (1st-place style) and synth distillation.
+
+- Online: DeepSeek-R1-Distill-Qwen-14B
+- Offline teacher: 32B (not in online service)
+- SQLite cache to avoid repeat inference
 """
+
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import sqlite3
 from pathlib import Path
-from typing import Optional
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
-
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 REASONER_SYSTEM = (
     "You are an expert mathematics educator. "
@@ -39,16 +36,11 @@ REASONER_USER_TEMPLATE = (
 
 
 class CoTReasoner:
-    """
-    生成 CoT 错因推理链，并缓存到 SQLite。
+    """Generate CoT rationale with SQLite cache.
 
-    示例：
+    Example:
         reasoner = CoTReasoner.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-14B")
-        rationale = reasoner.generate(
-            question="What is 5 × 4 + 6 ÷ 2?",
-            correct_answer="23",
-            wrong_answer="13",
-        )
+        rationale = reasoner.generate(question=..., correct_answer=..., wrong_answer=...)
     """
 
     def __init__(
@@ -58,24 +50,26 @@ class CoTReasoner:
         max_new_tokens: int = 256,
         temperature: float = 0.1,
         device: str = "cuda",
-        cache_db: Optional[str] = None,
+        cache_db: str | None = None,
+        force_no_think: bool = False,
     ) -> None:
         self.model = model.to(device)
         self.tokenizer = tokenizer
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.device = device
+        # R1-style models emit <think> first; force_no_think closes it for short answers (scripts/generate_cot.py).
+        self.force_no_think = force_no_think
         self._init_cache(cache_db)
 
-    def _init_cache(self, db_path: Optional[str]) -> None:
+    def _init_cache(self, db_path: str | None) -> None:
         if db_path is None:
             self._conn = None
             return
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS cot_cache "
-            "(key TEXT PRIMARY KEY, rationale TEXT)"
+            "CREATE TABLE IF NOT EXISTS cot_cache (key TEXT PRIMARY KEY, rationale TEXT)"
         )
         self._conn.commit()
 
@@ -83,12 +77,10 @@ class CoTReasoner:
         s = f"{question}|{correct}|{wrong}"
         return hashlib.md5(s.encode()).hexdigest()
 
-    def _get_cache(self, key: str) -> Optional[str]:
+    def _get_cache(self, key: str) -> str | None:
         if self._conn is None:
             return None
-        row = self._conn.execute(
-            "SELECT rationale FROM cot_cache WHERE key=?", (key,)
-        ).fetchone()
+        row = self._conn.execute("SELECT rationale FROM cot_cache WHERE key=?", (key,)).fetchone()
         return row[0] if row else None
 
     def _set_cache(self, key: str, rationale: str) -> None:
@@ -104,13 +96,14 @@ class CoTReasoner:
     def from_pretrained(
         cls,
         model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
-        adapter_path: Optional[str | Path] = None,
+        adapter_path: str | Path | None = None,
         max_new_tokens: int = 256,
         temperature: float = 0.1,
         device: str = "cuda",
-        cache_dir: Optional[str] = None,
-        cache_db: Optional[str] = None,
-    ) -> "CoTReasoner":
+        cache_dir: str | None = None,
+        cache_db: str | None = None,
+        force_no_think: bool | None = None,
+    ) -> CoTReasoner:
         tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -123,7 +116,10 @@ class CoTReasoner:
         if adapter_path is not None and Path(adapter_path).exists():
             model = PeftModel.from_pretrained(model, str(adapter_path))
             model = model.merge_and_unload()
-        return cls(model, tokenizer, max_new_tokens, temperature, device, cache_db)
+        # Auto enable force_no_think for R1/Distill models
+        if force_no_think is None:
+            force_no_think = any(k in model_name.lower() for k in ("r1", "distill", "think"))
+        return cls(model, tokenizer, max_new_tokens, temperature, device, cache_db, force_no_think)
 
     @torch.no_grad()
     def generate(
@@ -133,7 +129,7 @@ class CoTReasoner:
         wrong_answer: str,
         use_cache: bool = True,
     ) -> str:
-        """生成单条推理链。"""
+        """Generate one rationale."""
         key = self._cache_key(question, correct_answer, wrong_answer)
         if use_cache:
             cached = self._get_cache(key)
@@ -152,6 +148,8 @@ class CoTReasoner:
         text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+        if self.force_no_think and text.rstrip().endswith("<think>"):
+            text = text.rstrip() + "\n\n</think>\n\n"
         enc = self.tokenizer(text, return_tensors="pt").to(self.device)
         out = self.model.generate(
             **enc,
@@ -173,7 +171,7 @@ class CoTReasoner:
         items: list[dict],  # list of {question, correct_answer, wrong_answer, qa_key}
         use_cache: bool = True,
     ) -> dict[str, str]:
-        """批量生成，返回 {qa_key: rationale}。"""
+        """Batch generate; returns {qa_key: rationale}."""
         results: dict[str, str] = {}
         for item in items:
             rationale = self.generate(
@@ -192,7 +190,7 @@ class CoTReasoner:
         wrong_answer: str,
         use_cache: bool = True,
     ) -> str:
-        """异步包装（在 FastAPI 中使用 run_in_executor）。"""
+        """Async wrapper via run_in_executor (FastAPI)."""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             None,

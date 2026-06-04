@@ -1,15 +1,15 @@
 """
-MCP Server（Model Context Protocol）— 对应 JD "下游mcp接入"。
+MCP Server (Model Context Protocol) — downstream MCP integration.
 
-暴露工具：
-  - diagnose_misconception：给定数学题+错误选项，返回 top-K 错因候选
-  - search_misconceptions：纯文本检索错因库
-  - get_misconception_detail：获取指定 misconception 的详细信息
+Exposed tools:
+  - diagnose_misconception: given a math question and wrong answer, return top-K misconception candidates
+  - search_misconceptions: free-text search over the misconception bank
+  - get_misconception_detail: fetch details for a given misconception id
 
-协议：stdio（JSON-RPC 2.0 over stdin/stdout）
-使用方：可在 Cursor / Claude Desktop 的 MCP 配置中直接接入。
+Protocol: stdio (JSON-RPC 2.0 over stdin/stdout)
+Consumers: wire into Cursor / Claude Desktop via MCP config.
 
-Cursor 接入配置（写入 .cursor/mcp.json）：
+Cursor config (add to .cursor/mcp.json):
 {
   "mcpServers": {
     "eedi-misconception-engine": {
@@ -23,6 +23,7 @@ Cursor 接入配置（写入 .cursor/mcp.json）：
   }
 }
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -32,14 +33,14 @@ from typing import Any
 
 import httpx
 
-
-# 对接本地 FastAPI 服务（MCP → HTTP → FastAPI）
+# Proxy to local FastAPI (MCP → HTTP → FastAPI)
 FASTAPI_BASE = "http://localhost:6006"
 
 
 # ─────────────────────────────────────────────
-# MCP 协议工具函数
+# MCP protocol helpers
 # ─────────────────────────────────────────────
+
 
 def mcp_response(request_id: Any, result: Any) -> dict:
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
@@ -50,24 +51,28 @@ def mcp_error(request_id: Any, code: int, message: str) -> dict:
 
 
 # ─────────────────────────────────────────────
-# 工具定义（MCP tools/list 返回值）
+# Tool definitions (MCP tools/list response)
 # ─────────────────────────────────────────────
 
 TOOLS = [
     {
         "name": "diagnose_misconception",
         "description": (
-            "给定一道数学题及学生的错误答案，从 2587 条数学错因库中检索最可能的错因，"
-            "返回 top-K 候选（含 ID、名称、置信度）及 CoT 推理解释。"
+            "Given a math question and the student's wrong answer, retrieve the most likely misconceptions "
+            "from a bank of 2587 math misconceptions; returns top-K candidates (id, name, score) and optional CoT rationale."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "question_text": {"type": "string", "description": "数学题目文本"},
-                "correct_answer": {"type": "string", "description": "正确答案"},
-                "wrong_answer": {"type": "string", "description": "学生的错误答案"},
-                "subject_name": {"type": "string", "description": "学科（可选）"},
-                "top_k": {"type": "integer", "default": 5, "description": "返回候选数"},
+                "question_text": {"type": "string", "description": "Math question text"},
+                "correct_answer": {"type": "string", "description": "Correct answer"},
+                "wrong_answer": {"type": "string", "description": "Student's incorrect answer"},
+                "subject_name": {"type": "string", "description": "Subject (optional)"},
+                "top_k": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Number of candidates to return",
+                },
                 "include_rationale": {"type": "boolean", "default": True},
             },
             "required": ["question_text", "correct_answer", "wrong_answer"],
@@ -75,11 +80,11 @@ TOOLS = [
     },
     {
         "name": "search_misconceptions",
-        "description": "用自由文本检索数学错因库，返回语义最相关的错因列表。",
+        "description": "Free-text semantic search over the math misconception bank.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "检索文本"},
+                "query": {"type": "string", "description": "Search query text"},
                 "top_k": {"type": "integer", "default": 10},
             },
             "required": ["query"],
@@ -87,7 +92,7 @@ TOOLS = [
     },
     {
         "name": "get_misconception_detail",
-        "description": "获取指定 MisconceptionId 的详细描述。",
+        "description": "Fetch the full description for a MisconceptionId.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -100,8 +105,9 @@ TOOLS = [
 
 
 # ─────────────────────────────────────────────
-# 工具执行
+# Tool execution
 # ─────────────────────────────────────────────
+
 
 async def call_tool(name: str, args: dict) -> Any:
     async with httpx.AsyncClient(base_url=FASTAPI_BASE, timeout=60.0) as client:
@@ -109,10 +115,12 @@ async def call_tool(name: str, args: dict) -> Any:
             resp = await client.post("/diagnose", json=args)
             resp.raise_for_status()
             data = resp.json()
-            # 格式化为 MCP 文本内容
+            # Format as MCP text content
             lines = [f"## 错因诊断结果（{data['pipeline_mode']} | {data['latency_ms']:.0f}ms）\n"]
             for c in data["candidates"]:
-                lines.append(f"{c['rank']}. [{c['misconception_id']}] {c['misconception_name']} (score={c['score']:.3f})")
+                lines.append(
+                    f"{c['rank']}. [{c['misconception_id']}] {c['misconception_name']} (score={c['score']:.3f})"
+                )
             if data.get("rationale"):
                 lines.append(f"\n**推理解释：** {data['rationale']}")
             return "\n".join(lines)
@@ -123,13 +131,15 @@ async def call_tool(name: str, args: dict) -> Any:
             results = resp.json()
             lines = [f"## 检索结果（query: {args['query'][:50]}...）\n"]
             for r in results:
-                lines.append(f"- [{r['misconception_id']}] {r['misconception_name']} ({r['score']:.3f})")
+                lines.append(
+                    f"- [{r['misconception_id']}] {r['misconception_name']} ({r['score']:.3f})"
+                )
             return "\n".join(lines)
 
         elif name == "get_misconception_detail":
             mid = args["misconception_id"]
-            resp = await client.get(f"/metrics")
-            # 简化：从 /health 获取全量 misc_texts 不现实，这里从本地 CSV 读
+            resp = await client.get("/metrics")
+            # Simplified: full misc_texts via /health is impractical; local CSV lookup would go here
             return f"MisconceptionId={mid}（需本地 CSV 查询，或通过 /search 检索）"
 
         else:
@@ -137,11 +147,12 @@ async def call_tool(name: str, args: dict) -> Any:
 
 
 # ─────────────────────────────────────────────
-# MCP stdio 主循环
+# MCP stdio main loop
 # ─────────────────────────────────────────────
 
+
 async def main() -> None:
-    """读取 stdin JSON-RPC，处理后写 stdout。"""
+    """Read JSON-RPC from stdin, write responses to stdout."""
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
     await asyncio.get_event_loop().connect_read_pipe(lambda: protocol, sys.stdin)

@@ -1,27 +1,32 @@
 """
-GRPO 强化学习精排。
-Reward：
-  - top1_hit: 金标 misconception 是否排在第 1 位 (0 or 1)
-  - ndcg_gain: nDCG@5 相对于随机基线的增益（连续，可微分代理）
-使用 TRL GRPOTrainer，prompt = listwise 输入，response = 排序字母串。
+GRPO reinforcement learning for listwise reranking.
+
+Rewards:
+  - top1_hit: gold misconception at rank 1 (0 or 1)
+  - ndcg_gain: nDCG@5 gain vs random baseline (continuous proxy)
+Uses TRL GRPOTrainer: prompt = listwise input, response = letter ranking string.
 """
+
 from __future__ import annotations
 
-import re
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from eval.evaluator import ndcg_at_k
-from src.eedi.reranker.listwise import ALPHABET, parse_listwise_output
 
+from src.eedi.reranker.listwise import parse_listwise_output
+
+if TYPE_CHECKING:
+    import datasets
 
 # ─────────────────────────────────────────────
-# Reward 函数（供 TRL GRPOTrainer 使用）
+# Reward functions for TRL GRPOTrainer
 # ─────────────────────────────────────────────
+
 
 def make_ranking_reward(reward_type: str = "ndcg_gain"):
     """
-    返回 reward_fn(completions, true_ids, candidate_ids_list, **kwargs) -> list[float]
-    TRL GRPOTrainer 传入 completions（模型输出文本列表）和 kwargs 中的自定义字段。
+    Returns reward_fn(completions, true_ids, candidate_ids_list, **kwargs) -> list[float].
+    TRL passes completions (model outputs) and custom fields in kwargs.
     """
 
     def reward_fn(
@@ -50,28 +55,29 @@ def make_ranking_reward(reward_type: str = "ndcg_gain"):
 
 
 # ─────────────────────────────────────────────
-# GRPO 训练入口（dataset 准备 + GRPOTrainer 配置）
+# GRPO training entry (dataset prep + GRPOTrainer)
 # ─────────────────────────────────────────────
+
 
 def prepare_grpo_dataset(
     long_df,
     misc_texts: dict[int, str],
     candidate_pool: dict[str, list[int]],
-    cot_cache: Optional[dict[str, str]] = None,
+    cot_cache: dict[str, str] | None = None,
     n_candidates: int = 10,
     split: str = "train",
     fold: int = 0,
-) -> "datasets.Dataset":  # type: ignore[name-defined]
+) -> datasets.Dataset:  # type: ignore[name-defined]
     """
-    将 EediDataset 转为 GRPOTrainer 需要的格式：
-      - prompt: listwise 输入文本
-      - true_id: int（ground truth misconception id）
-      - candidate_ids: list[int]（召回候选）
+    Build GRPOTrainer dataset rows:
+      - prompt: listwise input
+      - true_id: gold misconception id
+      - candidate_ids: retrieval candidates
     """
-    from datasets import Dataset
-    from src.eedi.reranker.listwise import build_listwise_prompt, LISTWISE_SYSTEM
-
     import polars as pl
+    from datasets import Dataset
+
+    from src.eedi.reranker.listwise import LISTWISE_SYSTEM, build_listwise_prompt
 
     if split == "train":
         df = long_df.filter(pl.col("fold") != fold)
@@ -120,13 +126,13 @@ def run_grpo_training(
     gradient_accumulation_steps: int = 8,
     lora_r: int = 32,
     lora_alpha: int = 64,
-    cache_dir: Optional[str] = None,
+    cache_dir: str | None = None,
 ) -> None:
-    """启动 TRL GRPOTrainer 进行强化学习微调。"""
+    """Run TRL GRPOTrainer RL fine-tuning."""
     import torch
-    from trl import GRPOConfig, GRPOTrainer
     from peft import LoraConfig
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    from trl import GRPOConfig, GRPOTrainer
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, cache_dir=cache_dir)
     if tokenizer.pad_token is None:
@@ -159,7 +165,7 @@ def run_grpo_training(
         bf16=True,
         gradient_checkpointing=True,
         max_new_tokens=64,
-        num_generations=4,         # G：每个 prompt 采样 4 个 completion
+        num_generations=4,  # G: 4 completions per prompt
         logging_steps=10,
         save_steps=100,
         report_to="none",

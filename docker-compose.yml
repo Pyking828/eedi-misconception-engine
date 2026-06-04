@@ -1,0 +1,23 @@
+services:
+  eedi-engine:
+    build: .
+    ports:
+      - "6006:6006"
+    environment:
+      EEDI_LIGHT: ${EEDI_LIGHT:-1}
+      EEDI_FORCE_FULL: ${EEDI_FORCE_FULL:-0}
+      HF_HOME: /data/hf_cache
+      EEDI_DATA: /data/eedi-data
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ${HF_CACHE_DIR:-../hf_cache}:/data/hf_cache
+      - ${EEDI_DATA_DIR:-../eedi-data}:/data/eedi-data
+      - ${OUTPUTS_DIR:-./outputs}:/data/outputs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

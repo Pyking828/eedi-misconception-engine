@@ -41,6 +41,7 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "rich>=13.0.0",
     "tqdm>=4.66.0",
+    "trackio>=0.2.0",
 ]
 
 [project.optional-dependencies]
@@ -68,7 +69,12 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
-ignore = ["E501"]
+# ML 约定豁免：N806/N812（torch as F、D/I 等）、E741（faiss D,I）、E501（长行）
+ignore = ["E501", "N806", "N812", "E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# 脚本用 sys.path.insert 后再 import（E402），允许
+"scripts/*.py" = ["E402"]
 
 [tool.black]
 line-length = 100

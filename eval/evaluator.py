@@ -1,21 +1,21 @@
 """
-MAP@K / Recall@K / nDCG@K 评测器。
-支持离线评测（给定 predictions + ground_truth）和在线实时指标。
+MAP@K / Recall@K / nDCG@K evaluator.
+Offline (predictions + labels) and online incremental metrics.
 """
+
 from __future__ import annotations
 
 import json
 import math
 from pathlib import Path
-from typing import Optional
-
 
 # ─────────────────────────────────────────────
-# 核心指标函数
+# Core metric functions
 # ─────────────────────────────────────────────
+
 
 def average_precision_at_k(predicted_ids: list[int], true_id: int, k: int = 25) -> float:
-    """MAP@K 中单条样本的 AP 值。只有一个正例。"""
+    """Per-sample AP for MAP@K (single relevant item)."""
     for rank, pid in enumerate(predicted_ids[:k], start=1):
         if pid == true_id:
             return 1.0 / rank
@@ -27,7 +27,7 @@ def recall_at_k(predicted_ids: list[int], true_id: int, k: int = 25) -> float:
 
 
 def ndcg_at_k(predicted_ids: list[int], true_id: int, k: int = 25) -> float:
-    """nDCG@K（二元相关度，ideal DCG = 1.0）。"""
+    """nDCG@K (binary relevance, ideal DCG = 1.0)."""
     for rank, pid in enumerate(predicted_ids[:k], start=1):
         if pid == true_id:
             return 1.0 / math.log2(rank + 1)
@@ -35,14 +35,15 @@ def ndcg_at_k(predicted_ids: list[int], true_id: int, k: int = 25) -> float:
 
 
 # ─────────────────────────────────────────────
-# 批量评测
+# Batch evaluation
 # ─────────────────────────────────────────────
+
 
 class EediEvaluator:
     """
-    用法：
+    Usage:
         evaluator = EediEvaluator(k=25)
-        evaluator.update(predicted_ids=[1, 42, 7, ...], true_id=42)
+        evaluator.update(predicted_ids=[...], true_id=42)
         metrics = evaluator.compute()
     """
 
@@ -91,15 +92,15 @@ class EediEvaluator:
 def evaluate_pipeline(
     predictions: list[dict],
     k: int = 25,
-    report_path: Optional[str | Path] = None,
+    report_path: str | Path | None = None,
     per_subject: bool = True,
 ) -> dict[str, float | dict]:
     """
     predictions: list of {
         "QuestionId_Answer": str,
-        "predicted_ids": [int, ...],   # 降序排列的 MisconceptionId
+        "predicted_ids": [int, ...],   # MisconceptionIds, descending score
         "true_id": int,
-        "SubjectName": str  (可选)
+        "SubjectName": str  (optional)
     }
     """
     overall = EediEvaluator(k=k)

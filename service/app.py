@@ -1,40 +1,40 @@
 """
-FastAPI 异步服务（对应 JD：asyncio/fastapi/函数注解）。
+Async FastAPI service (asyncio / FastAPI / type annotations).
 
-端点：
-  POST /diagnose           → 完整诊断（非流式）
-  POST /diagnose/stream    → SSE 流式诊断
-  POST /search             → 纯向量检索（轻量）
-  POST /feedback           → 用户反馈提交
-  GET  /health             → 健康检查
-  GET  /metrics            → 简单指标统计
-  GET  /docs               → Swagger 自动文档
+Endpoints:
+  POST /diagnose           → full diagnosis (non-streaming)
+  POST /diagnose/stream    → SSE streaming diagnosis
+  POST /search             → vector search only (lightweight)
+  POST /feedback           → submit user feedback
+  GET  /health             → health check
+  GET  /metrics            → simple metrics
+  GET  /docs               → Swagger UI
 
-设计：
-  - Pydantic v2 请求/响应模型，完整类型注解
-  - 启动时懒加载 GPU 组件（避免 import 时 OOM）
-  - lifespan context manager 管理资源（SQLite 连接等）
+Design:
+  - Pydantic v2 request/response models with full type hints
+  - Lazy-load GPU components at startup (avoid OOM on import)
+  - lifespan context manager for resources (SQLite, etc.)
 """
+
 from __future__ import annotations
 
 import json
+import os
 import time
-import uuid
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator, Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+# ─────────────────────────────────────────────
+# Global component container (lazy-loaded)
+# ─────────────────────────────────────────────
 
-# ─────────────────────────────────────────────
-# 全局组件容器（懒加载）
-# ─────────────────────────────────────────────
 
 class AppState:
     orchestrator = None
@@ -49,7 +49,7 @@ state = AppState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """FastAPI lifespan：启动时加载组件，关闭时释放资源。"""
+    """FastAPI lifespan: load components on startup, release on shutdown."""
     print("[Service] 初始化中...")
     await _load_components()
     state.ready = True
@@ -61,7 +61,7 @@ async def lifespan(app: FastAPI):
 
 
 async def _load_components() -> None:
-    """懒加载 GPU 组件（仅在配置文件和模型存在时加载）。"""
+    """Lazy-load GPU components when config and model artifacts exist."""
     from omegaconf import OmegaConf
 
     cfg_path = Path(__file__).parent.parent / "configs" / "base.yaml"
@@ -71,37 +71,88 @@ async def _load_components() -> None:
 
     cfg = OmegaConf.load(str(cfg_path))
 
-    # 加载 misconception 文本（轻量，必须）
+    # Load misconception texts (lightweight, required)
     misc_csv = Path(cfg.data.misconception_csv)
     if misc_csv.exists():
         import polars as pl
+
         misc_df = pl.read_csv(str(misc_csv))
         state.misc_texts = {
-            r["MisconceptionId"]: r["MisconceptionName"]
-            for r in misc_df.iter_rows(named=True)
+            r["MisconceptionId"]: r["MisconceptionName"] for r in misc_df.iter_rows(named=True)
         }
 
-    # 加载记忆模块
+    # Load memory module
     from src.eedi.memory.memory import MemoryModule
+
     state.memory = MemoryModule(cfg.memory.db_path)
     await state.memory.init()
 
-    # 加载 Retriever（索引存在时）
+    # Heavy GPU models (8B retriever + 8B reranker). Set EEDI_LIGHT=1 to skip for CPU/light deploy.
+    light = os.environ.get("EEDI_LIGHT", "0") == "1"
+
+    # Load retriever (STRetriever + multistage adapter, aligned with FAISS index)
     index_path = Path(cfg.retriever.faiss_index_path)
-    if index_path.exists():
-        from src.eedi.retriever.retriever import EediRetriever
-        retriever = EediRetriever.from_pretrained(
+    misc_ids_path = Path(cfg.retriever.get("misc_ids_path", ""))
+    retriever = None
+    if index_path.exists() and not light:
+        import json as _json
+
+        from src.eedi.retriever.st_engine import STRetriever
+
+        misc_ids = (
+            _json.loads(misc_ids_path.read_text())
+            if misc_ids_path.exists()
+            else list(state.misc_texts.keys())
+        )
+        retriever = STRetriever.from_pretrained(
             model_name=cfg.retriever.model_name,
             index_path=str(index_path),
-            misc_ids=list(state.misc_texts.keys()),
+            misc_ids=[int(x) for x in misc_ids],
             misc_texts=state.misc_texts,
+            adapter_path=cfg.retriever.get("adapter_path"),
             cache_dir=cfg.paths.hf_cache,
         )
+        print(
+            f"[Service] STRetriever 就绪（{cfg.retriever.model_name} + {Path(cfg.retriever.get('adapter_path', '')).name}）"
+        )
+    elif light:
+        print("[Service] EEDI_LIGHT=1，跳过重型召回器（仅 API 骨架可用）")
     else:
-        retriever = None
         print("[Service] FAISS 索引未找到，向量检索不可用")
 
-    # 组装 Orchestrator
+    # Load pointwise reranker (yes/no logit scoring, matches training)
+    pointwise = None
+    rr_adapter = cfg.reranker.pointwise.get("adapter_path")
+    if retriever is not None and rr_adapter and Path(rr_adapter).exists():
+        from src.eedi.reranker.pointwise import LogitReranker
+
+        pointwise = LogitReranker.from_pretrained(
+            model_name=cfg.reranker.pointwise.model_name,
+            adapter_path=rr_adapter,
+            max_length=cfg.reranker.pointwise.get("max_seq_len", 768),
+            cache_dir=cfg.paths.hf_cache,
+        )
+        print("[Service] LogitReranker 就绪（Qwen3-Reranker-8B + 最优 adapter）")
+
+    # Load CoT reasoner subagent (default Qwen2.5-3B-Instruct; override with EEDI_REASONER)
+    reasoner = None
+    reasoner_model = os.environ.get("EEDI_REASONER", "Qwen/Qwen2.5-3B-Instruct")
+    if retriever is not None and reasoner_model.lower() != "none":
+        try:
+            from src.eedi.reasoner.reasoner import CoTReasoner
+
+            reasoner = CoTReasoner.from_pretrained(
+                model_name=reasoner_model,
+                max_new_tokens=200,
+                temperature=0.3,
+                cache_dir=cfg.paths.hf_cache,
+                cache_db=str(Path(cfg.paths.outputs) / "cot_cache.db"),
+            )
+            print(f"[Service] CoTReasoner 就绪（{reasoner_model}）")
+        except Exception as e:  # Reasoner is optional; failure does not block main path
+            print(f"[Service] CoTReasoner 跳过: {e}")
+
+    # Assemble orchestrator
     if retriever is not None:
         from src.eedi.orchestrator import Orchestrator, PromptRegistry
         from src.eedi.router.router import QueryRouter
@@ -111,6 +162,9 @@ async def _load_components() -> None:
         router = QueryRouter(memory=state.memory)
         state.orchestrator = Orchestrator(
             retriever=retriever,
+            pointwise_reranker=pointwise,
+            reasoner=reasoner,
+            force_full=os.environ.get("EEDI_FORCE_FULL", "0") == "1",
             router=router,
             memory=state.memory,
             misc_texts=state.misc_texts,
@@ -119,15 +173,15 @@ async def _load_components() -> None:
 
 
 # ─────────────────────────────────────────────
-# FastAPI 应用
+# FastAPI app
 # ─────────────────────────────────────────────
 
 app = FastAPI(
     title="Eedi Misconception Engine API",
     description=(
-        "数学错因诊断中控系统 — 企业级召回→粗排→精排→CoT推理 级联服务。\n\n"
-        "对应 vivo 蓝心小v 中控 3.0 架构：工具检索召回/排序 + 智能路由 + "
-        "prompt管理 + 感知记忆 + MCP/SubAgent接入。"
+        "数学错因诊断中控系统 — 召回 → 粗排 → 精排 → CoT 推理 级联服务。\n\n"
+        "工程能力：工具检索召回/排序 + 智能路由 + Prompt 管理 + "
+        "感知记忆 + MCP / SubAgent 接入 + SSE 流式。"
     ),
     version="0.1.0",
     lifespan=lifespan,
@@ -142,18 +196,19 @@ app.add_middleware(
 
 
 # ─────────────────────────────────────────────
-# Pydantic 模型（pydantic v2 + 完整类型注解）
+# Pydantic models (v2 + full type hints)
 # ─────────────────────────────────────────────
 
+
 class DiagnoseInput(BaseModel):
-    question_text: str = Field(..., description="数学题目文本")
-    correct_answer: str = Field(..., description="正确答案文本")
-    wrong_answer: str = Field(..., description="学生的错误答案文本")
-    subject_name: str = Field(default="", description="学科（Number/Algebra/...）")
-    construct_name: str = Field(default="", description="知识点")
-    session_id: str = Field(default="default", description="会话 ID（用于记忆）")
-    top_k: int = Field(default=25, ge=1, le=50, description="返回候选数")
-    include_rationale: bool = Field(default=True, description="是否生成 CoT 推理解释")
+    question_text: str = Field(..., description="Math question text")
+    correct_answer: str = Field(..., description="Correct answer text")
+    wrong_answer: str = Field(..., description="Student's incorrect answer text")
+    subject_name: str = Field(default="", description="Subject (Number/Algebra/...)")
+    construct_name: str = Field(default="", description="Topic / construct name")
+    session_id: str = Field(default="default", description="Session id (for memory)")
+    top_k: int = Field(default=25, ge=1, le=50, description="Number of candidates to return")
+    include_rationale: bool = Field(default=True, description="Whether to generate CoT rationale")
 
 
 class MisconceptionResult(BaseModel):
@@ -174,7 +229,7 @@ class DiagnoseOutput(BaseModel):
 
 
 class SearchInput(BaseModel):
-    query: str = Field(..., description="自由文本检索 query")
+    query: str = Field(..., description="Free-text search query")
     top_k: int = Field(default=10, ge=1, le=50)
 
 
@@ -199,8 +254,9 @@ class HealthOutput(BaseModel):
 
 
 # ─────────────────────────────────────────────
-# 路由
+# Routes
 # ─────────────────────────────────────────────
+
 
 @app.get("/health", response_model=HealthOutput, summary="健康检查")
 async def health() -> HealthOutput:
@@ -254,7 +310,7 @@ async def diagnose(body: DiagnoseInput) -> DiagnoseOutput:
 
 @app.post("/diagnose/stream", summary="错因诊断（SSE 流式）")
 async def diagnose_stream(body: DiagnoseInput) -> EventSourceResponse:
-    """Server-Sent Events 流式接口：先快速返回召回结果，再推流 CoT 推理。"""
+    """SSE stream: return retrieval results first, then stream CoT rationale."""
     if state.orchestrator is None:
         raise HTTPException(status_code=503, detail="Models not loaded")
 
@@ -282,7 +338,7 @@ async def diagnose_stream(body: DiagnoseInput) -> EventSourceResponse:
 
 @app.post("/search", response_model=list[SearchResult], summary="纯向量检索（轻量）")
 async def search(body: SearchInput) -> list[SearchResult]:
-    """跳过重排，直接返回向量召回结果（适合 HF Spaces CPU demo）。"""
+    """Skip reranking; return vector retrieval only (HF Spaces CPU demo)."""
     if state.orchestrator is None or state.orchestrator.retriever is None:
         raise HTTPException(status_code=503, detail="Retriever not loaded")
 
@@ -325,16 +381,18 @@ async def metrics() -> dict:
 
 
 # ─────────────────────────────────────────────
-# Gradio UI（挂载到 /ui）
+# Gradio UI (mounted at /ui)
 # ─────────────────────────────────────────────
+
 
 def create_gradio_app():
     import gradio as gr
 
     async def diagnose_fn(question, correct, wrong, subject, top_k):
         if state.orchestrator is None:
-            return "⚠️ 模型尚未加载，请先运行向量索引构建脚本。", ""
+            return "⚠️ Models not loaded yet.", "", ""
         from src.eedi.orchestrator import DiagnoseRequest
+
         req = DiagnoseRequest(
             question_text=question,
             correct_answer=correct,
@@ -350,41 +408,48 @@ def create_gradio_app():
             for c in resp.candidates[:10]
         )
         meta = (
-            f"📡 模式: `{resp.pipeline_mode}` | "
-            f"学科: `{resp.subject}` | "
-            f"缓存: `{resp.from_cache}` | "
-            f"延迟: `{resp.latency_ms:.0f}ms`"
+            f"📡 mode: `{resp.pipeline_mode}` | "
+            f"subject: `{resp.subject}` | "
+            f"cached: `{resp.from_cache}` | "
+            f"latency: `{resp.latency_ms:.0f}ms`"
         )
         return cand_md, resp.rationale, meta
 
-    with gr.Blocks(title="Eedi 错因诊断中控", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="Eedi Misconception Engine", theme=gr.themes.Soft()) as demo:
         gr.Markdown(
-            "# 🎓 Eedi 数学错因诊断中控系统\n"
-            "> 召回 → 粗排 → 精排 → CoT推理 全链路 | "
-            "Qwen3-Embedding + LoRA + GRPO | vivo蓝心中控3.0风格"
+            "# 🎓 Eedi Math Misconception Diagnosis Engine\n"
+            "> Retrieve → Rerank → Listwise → CoT pipeline · "
+            "Qwen3-Embedding + LoRA + GRPO"
         )
 
         with gr.Row():
             with gr.Column(scale=2):
                 question = gr.Textbox(
-                    label="题目 (QuestionText)",
+                    label="Question",
                     placeholder="e.g. Simplify: 5 × 4 + 6 ÷ 2",
                     lines=3,
                 )
                 with gr.Row():
-                    correct = gr.Textbox(label="正确答案", placeholder="e.g. 23")
-                    wrong = gr.Textbox(label="学生错误答案", placeholder="e.g. 13")
+                    correct = gr.Textbox(label="Correct Answer", placeholder="e.g. 23")
+                    wrong = gr.Textbox(label="Student's Wrong Answer", placeholder="e.g. 13")
                 with gr.Row():
                     subject = gr.Dropdown(
-                        choices=["", "Number", "Algebra", "Geometry and Measure", "Data and Statistics"],
-                        label="学科", value=""
+                        choices=[
+                            "",
+                            "Number",
+                            "Algebra",
+                            "Geometry and Measure",
+                            "Data and Statistics",
+                        ],
+                        label="Subject",
+                        value="",
                     )
                     top_k = gr.Slider(5, 25, value=10, step=1, label="Top-K")
-                btn = gr.Button("🔍 诊断错因", variant="primary")
+                btn = gr.Button("🔍 Diagnose", variant="primary")
 
             with gr.Column(scale=3):
-                candidates_out = gr.Markdown(label="候选错因（Top-K）")
-                rationale_out = gr.Textbox(label="CoT 推理解释", lines=6)
+                candidates_out = gr.Markdown(label="Candidate Misconceptions (Top-K)")
+                rationale_out = gr.Textbox(label="Chain-of-Thought Explanation", lines=6)
                 meta_out = gr.Markdown()
 
         btn.click(
@@ -411,14 +476,16 @@ def create_gradio_app():
                 ],
             ],
             inputs=[question, correct, wrong, subject, top_k],
+            label="Examples (click to load)",
         )
 
     return demo
 
 
-# 挂载 Gradio 到 /ui
+# Mount Gradio at /ui
 try:
     import gradio as gr
+
     gradio_app = create_gradio_app()
     app = gr.mount_gradio_app(app, gradio_app, path="/ui")
 except Exception as e:
@@ -426,8 +493,9 @@ except Exception as e:
 
 
 # ─────────────────────────────────────────────
-# 启动入口
+# Entry point
 # ─────────────────────────────────────────────
+
 
 def main() -> None:
     uvicorn.run(

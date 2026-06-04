@@ -28,12 +28,10 @@ jobs:
           pip install -q omegaconf hydra-core jinja2 rich tqdm trl
 
       - name: Lint with ruff
-        run: |
-          ruff check src/ eval/ service/ mcp_server/ scripts/ tests/ || true
+        run: ruff check .
 
       - name: Format check with ruff
-        run: |
-          ruff format --check src/ eval/ service/ mcp_server/ || true
+        run: ruff format --check src/ eval/ service/ mcp_server/
 
       - name: Run smoke tests (no GPU, no Kaggle data)
         run: |

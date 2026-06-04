@@ -1,39 +1,37 @@
 """
-中控主流程（Orchestrator）— 异步串联全链路。
+Orchestrator — async end-to-end pipeline.
 
-对应 JD：
-  "负责蓝心小v中控3.0主流程架构设计研发及维护，prompt调优及管理，
-   上游感知记忆数据及下游mcp、subagent的快速接入"
+Flow:
+  query → Router → Retriever → Pointwise rerank → Listwise rerank → CoT reasoner → response
 
-流程：
-  query → 路由(Router) → 召回(Retriever) → 粗排(Pointwise) → 精排(Listwise) → 推理SubAgent → 返回
-
-设计原则：
-  - 全异步（asyncio）
-  - 感知记忆前置（命中缓存直接返回，跳过 GPU 推理）
-  - 成本感知路由（置信度高则跳过重排/推理）
-  - Prompt 版本化管理（从 prompts/ 加载 Jinja 模板）
-  - 流式输出（SSE）：推理 subagent 边生成边推流
+Design:
+  - Fully async (asyncio)
+  - Memory-first (cache hit skips GPU)
+  - Cost-aware routing (high confidence skips rerank/reasoning)
+  - Versioned prompts (Jinja under prompts/)
+  - SSE streaming from the reasoner subagent
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
 import time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncGenerator, Optional
 
 from src.eedi.router.router import PipelineMode, QueryRouter, RoutingDecision
 
+# ─────────────────────────────────────────────
+# Request / response types
+# ─────────────────────────────────────────────
 
-# ─────────────────────────────────────────────
-# 请求 / 响应结构
-# ─────────────────────────────────────────────
 
 @dataclass
 class DiagnoseRequest:
-    """中控入口请求（对应 FastAPI /diagnose 端点）。"""
+    """Orchestrator input (FastAPI /diagnose)."""
+
     question_text: str
     correct_answer: str
     wrong_answer: str
@@ -46,7 +44,7 @@ class DiagnoseRequest:
 
     @property
     def query(self) -> str:
-        """组装 AllText 格式的统一 query。"""
+        """Build unified AllText-style query."""
         return (
             f"Subject: {self.subject_name}\n"
             f"Topic: {self.construct_name}\n"
@@ -58,6 +56,7 @@ class DiagnoseRequest:
     @property
     def qa_key(self) -> str:
         import hashlib
+
         return hashlib.md5(self.query.encode()).hexdigest()[:12]
 
 
@@ -82,13 +81,12 @@ class DiagnoseResponse:
 
 
 # ─────────────────────────────────────────────
-# Prompt 注册表（版本化）
+# Prompt registry (versioned)
 # ─────────────────────────────────────────────
 
+
 class PromptRegistry:
-    """
-    管理 prompts/ 目录下的 Jinja2 模板，支持版本切换与 A/B 对比。
-    """
+    """Manage Jinja2 templates under prompts/ with version switching and A/B."""
 
     def __init__(self, prompts_dir: str | Path = "prompts") -> None:
         from jinja2 import Environment, FileSystemLoader
@@ -99,7 +97,7 @@ class PromptRegistry:
         )
         self._ab_versions: dict[str, str] = {}  # prompt_name → version
 
-    def render(self, name: str, version: Optional[str] = None, **kwargs) -> str:
+    def render(self, name: str, version: str | None = None, **kwargs) -> str:
         v = version or self._ab_versions.get(name, "v1")
         template = self.env.get_template(f"{name}/{v}.jinja")
         return template.render(**kwargs)
@@ -109,44 +107,46 @@ class PromptRegistry:
 
     def list_versions(self, name: str) -> list[str]:
         import glob
+
         pattern = str(Path("prompts") / name / "*.jinja")
         return [Path(p).stem for p in glob.glob(pattern)]
 
 
 # ─────────────────────────────────────────────
-# Orchestrator 主类
+# Orchestrator
 # ─────────────────────────────────────────────
 
-class Orchestrator:
-    """
-    异步中控主流程。
 
-    示例：
+class Orchestrator:
+    """Async orchestrator.
+
+    Example:
         orch = Orchestrator.from_config("configs/base.yaml")
         await orch.init()
         response = await orch.diagnose(request)
-        # 或流式：
         async for chunk in orch.diagnose_stream(request):
             print(chunk)
     """
 
     def __init__(
         self,
-        retriever,               # EediRetriever
-        pointwise_reranker=None, # PointwiseReranker（可 None）
-        listwise_reranker=None,  # ListwiseReranker（可 None）
-        reasoner=None,           # CoTReasoner（可 None）
-        router: Optional[QueryRouter] = None,
-        memory=None,             # MemoryModule（可 None）
-        misc_texts: Optional[dict[int, str]] = None,
-        prompt_registry: Optional[PromptRegistry] = None,
-        seen_misc_ids: Optional[set[int]] = None,
-        unseen_score_scale: float = 0.4,  # 复刻 3rd place 技巧
+        retriever,  # EediRetriever
+        pointwise_reranker=None,  # PointwiseReranker (optional)
+        listwise_reranker=None,  # ListwiseReranker (optional)
+        reasoner=None,  # CoTReasoner (optional)
+        router: QueryRouter | None = None,
+        memory=None,  # MemoryModule (optional)
+        misc_texts: dict[int, str] | None = None,
+        prompt_registry: PromptRegistry | None = None,
+        seen_misc_ids: set[int] | None = None,
+        unseen_score_scale: float = 0.4,  # 3rd-place unseen-misc trick
+        force_full: bool = False,  # Demo: always full pipeline (rerank+CoT), no cost routing / cache short-circuit
     ) -> None:
         self.retriever = retriever
         self.pointwise = pointwise_reranker
         self.listwise = listwise_reranker
         self.reasoner = reasoner
+        self.force_full = force_full
         self.router = router or QueryRouter()
         self.memory = memory
         self.misc_texts = misc_texts or {}
@@ -155,97 +155,96 @@ class Orchestrator:
         self.unseen_scale = unseen_score_scale
 
     @classmethod
-    def from_config(cls, config_path: str | Path) -> "Orchestrator":
-        """从 YAML 配置文件懒加载所有组件（适合生产部署）。"""
+    def from_config(cls, config_path: str | Path) -> Orchestrator:
+        """Lazy-load all components from YAML (production)."""
         from omegaconf import OmegaConf
+
         cfg = OmegaConf.load(str(config_path))
-        # 组件的实际加载在 init() 中完成
+        # Actual component loading happens in init()
         instance = cls.__new__(cls)
         instance._cfg = cfg
         instance._initialized = False
         return instance
 
     async def init(self) -> None:
-        """（如果从 from_config 创建）懒加载所有 GPU 组件。"""
+        """Lazy-load GPU components when created via from_config."""
         if getattr(self, "_initialized", True):
             return
-        # 实际项目中在此加载模型，这里留作扩展点
+        # Extension point for model loading in production
         self._initialized = True
 
     async def diagnose(self, req: DiagnoseRequest) -> DiagnoseResponse:
-        """完整诊断流程（非流式）。"""
+        """Full diagnosis (non-streaming)."""
         t0 = time.time()
         query = req.query
         qa_key = req.qa_key
 
-        # ① 路由决策（先查缓存）
-        decision = await self.router.route(
-            query, qa_key, retriever_scores=None
-        )
-        if decision.from_cache and decision.cached_result:
+        # ① Route (cache first). force_full skips cache short-circuit for full demo + CoT.
+        decision = await self.router.route(query, qa_key, retriever_scores=None)
+        if not self.force_full and decision.from_cache and decision.cached_result:
             return self._build_response(
                 req, decision.cached_result, "", decision, t0, from_cache=True
             )
 
-        # ② 召回
-        retrieved_ids, retriever_scores = self.retriever.retrieve(
-            query, top_k=50, with_scores=True
-        )
+        # ② Retrieve
+        retrieved_ids, retriever_scores = self.retriever.retrieve(query, top_k=50, with_scores=True)
 
-        # 更新路由置信度（有了分数后重决策）
+        # Re-route with retriever scores
         decision = await self.router.route(query, qa_key, retriever_scores)
+        # force_full: full pipeline for demo
+        if self.force_full:
+            decision.mode = PipelineMode.FULL_PIPELINE
 
-        # ③ 粗排（Pointwise）
+        # ③ Pointwise rerank
         if decision.mode in (PipelineMode.RETRIEVE_RERANK, PipelineMode.FULL_PIPELINE):
             if self.pointwise is not None:
                 candidate_ids = self.pointwise.rerank(
                     query, retrieved_ids[:50], self.misc_texts, top_k=10
                 )
-                # 未见错因分数调整（复刻 3rd place）
+                # Unseen-misc score adjustment (3rd place)
                 if self.seen_misc_ids:
                     candidate_ids = [
                         cid for cid in candidate_ids
-                    ]  # 分数已在 pointwise 内部处理
+                    ]  # scores handled inside pointwise
             else:
                 candidate_ids = retrieved_ids[:10]
         else:
-            candidate_ids = retrieved_ids[:req.top_k]
+            candidate_ids = retrieved_ids[: req.top_k]
 
-        # ④ CoT 推理 Subagent
+        # ④ CoT reasoner subagent
         rationale = ""
-        if decision.mode == PipelineMode.FULL_PIPELINE and self.reasoner is not None and req.include_rationale:
+        if (
+            decision.mode == PipelineMode.FULL_PIPELINE
+            and self.reasoner is not None
+            and req.include_rationale
+        ):
             rationale = await self.reasoner.async_generate(
                 req.question_text, req.correct_answer, req.wrong_answer
             )
 
-        # ⑤ 精排（Listwise）
+        # ⑤ Listwise rerank
         if decision.mode == PipelineMode.FULL_PIPELINE and self.listwise is not None:
             final_ids = self.listwise.rerank(
-                query, candidate_ids, self.misc_texts,
-                top_k=req.top_k, cot_rationale=rationale
+                query, candidate_ids, self.misc_texts, top_k=req.top_k, cot_rationale=rationale
             )
         else:
-            final_ids = candidate_ids[:req.top_k]
+            final_ids = candidate_ids[: req.top_k]
 
-        # ⑥ 写入缓存 & 难负例
+        # ⑥ Cache result & hard negatives
         if self.memory is not None:
             await self.memory.set_result(qa_key, final_ids)
             await self.memory.log_session(req.session_id, qa_key, query, final_ids)
 
         return self._build_response(req, final_ids, rationale, decision, t0)
 
-    async def diagnose_stream(
-        self, req: DiagnoseRequest
-    ) -> AsyncGenerator[str, None]:
-        """
-        流式诊断（SSE）：
-        先快速返回召回/粗排结果，再流式输出 CoT 推理。
-        """
+    async def diagnose_stream(self, req: DiagnoseRequest) -> AsyncGenerator[str, None]:
+        """SSE diagnosis: retrieval/rerank first, then streamed CoT."""
+
         t0 = time.time()
         query = req.query
         qa_key = req.qa_key
 
-        # ① 路由 + 召回（同步，快）
+        # ① Route + retrieve (sync, fast)
         decision = await self.router.route(query, qa_key)
         if decision.from_cache and decision.cached_result:
             yield json.dumps(
@@ -256,13 +255,11 @@ class Orchestrator:
         retrieved_ids, _ = self.retriever.retrieve(query, top_k=50, with_scores=True)
 
         if self.pointwise is not None:
-            candidate_ids = self.pointwise.rerank(
-                query, retrieved_ids, self.misc_texts, top_k=10
-            )
+            candidate_ids = self.pointwise.rerank(query, retrieved_ids, self.misc_texts, top_k=10)
         else:
             candidate_ids = retrieved_ids[:10]
 
-        # ② 先推流中间结果
+        # ② Stream intermediate candidates
         yield json.dumps(
             {
                 "event": "candidates",
@@ -271,7 +268,7 @@ class Orchestrator:
             }
         )
 
-        # ③ CoT 推理流式（模拟 token-by-token）
+        # ③ Stream CoT (word-chunk simulation)
         if self.reasoner is not None and req.include_rationale:
             rationale = await self.reasoner.async_generate(
                 req.question_text, req.correct_answer, req.wrong_answer
@@ -280,11 +277,9 @@ class Orchestrator:
                 yield json.dumps({"event": "rationale_token", "data": word + " "})
                 await asyncio.sleep(0.02)
 
-        # ④ 精排 + 最终结果
+        # ④ Listwise + final result
         if self.listwise is not None:
-            final_ids = self.listwise.rerank(
-                query, candidate_ids, self.misc_texts, top_k=req.top_k
-            )
+            final_ids = self.listwise.rerank(query, candidate_ids, self.misc_texts, top_k=req.top_k)
         else:
             final_ids = candidate_ids[: req.top_k]
 
@@ -311,7 +306,7 @@ class Orchestrator:
             MisconceptionCandidate(
                 misconception_id=mid,
                 misconception_name=self.misc_texts.get(mid, ""),
-                score=1.0 / (rank + 1),  # 简化打分
+                score=1.0 / (rank + 1),  # simplified score
                 rank=rank + 1,
             )
             for rank, mid in enumerate(final_ids)

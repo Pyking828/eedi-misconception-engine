@@ -4,23 +4,32 @@ emoji: 🎓
 colorFrom: blue
 colorTo: green
 sdk: gradio
-sdk_version: "4.44.0"
+sdk_version: "5.9.1"
+python_version: "3.11"
 app_file: app.py
 pinned: false
 license: mit
 ---
 
-# Eedi 数学错因检索 Demo
+# 🎓 Eedi Math Misconception Diagnosis — Demo
 
-CPU 版轻量演示，使用 bge-m3 + FAISS 实现零样本错因检索。
+Given a math question, the correct answer and a student's wrong answer, this engine
+retrieves the most likely **misconception** behind the error (Kaggle *Eedi - Mining
+Misconceptions in Mathematics*).
 
-完整版（本地 GPU）包含：
-- Qwen3-Embedding-8B LoRA 微调召回器
-- Qwen3-Reranker-8B 粗排
-- DeepSeek-R1-Distill-Qwen-14B + GRPO 精排/推理
-- DeepSeek-R1-Distill-Qwen-32B 离线 teacher / judge / 蒸馏增强
-- CoT 推理 SubAgent
-- FastAPI SSE 流式服务
-- MCP Server 接入
+This **Space is the lightweight CPU demo**: `bge-m3` + FAISS retrieval over the 2587 real
+misconceptions (embeddings are precomputed and shipped, so cold start is fast).
 
-GitHub：https://github.com/YOUR_GITHUB/eedi-misconception-engine
+## Full pipeline (local GPU)
+
+The complete system (in the GitHub repo) is a retrieve → rerank → listwise → CoT cascade:
+
+- **Retriever:** Qwen3-Embedding-8B + LoRA (contrastive learning)
+- **Pointwise reranker:** Qwen3-Reranker-8B + LoRA (yes/no logit)
+- **Ensemble + listwise:** two rerankers + R1-14B listwise (option-logit SFT)
+- **Reasoning:** DeepSeek-R1-Distill-Qwen-14B CoT explanation (offline 32B teacher/judge)
+- **Serving:** FastAPI (async + SSE) · Gradio UI · MCP Server
+
+**Final offline result:** fold0 CV **MAP@25 = 0.597** (≈ Kaggle private-LB top-3).
+
+GitHub (full code + reproduction): see the project repository.

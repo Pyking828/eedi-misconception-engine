@@ -1,11 +1,12 @@
-"""单元测试：评测器"""
+"""Unit tests: evaluator"""
+
 import pytest
 from eval.evaluator import (
-    average_precision_at_k,
-    recall_at_k,
-    ndcg_at_k,
     EediEvaluator,
+    average_precision_at_k,
     evaluate_pipeline,
+    ndcg_at_k,
+    recall_at_k,
 )
 
 
@@ -22,9 +23,9 @@ def test_ap_not_found():
 
 
 def test_ap_beyond_k():
-    # id=1 出现在位置 3 (0-indexed 2)，在 k=25 内，故 AP=1/3
+    # id=1 at rank 3 (1-based), within k=25 → AP=1/3
     assert average_precision_at_k([2, 3] + [1] * 30, true_id=1, k=25) == pytest.approx(1 / 3)
-    # id=1 完全不在前 k 个结果中
+    # id=1 not in top-k
     assert average_precision_at_k([2, 3, 4, 5], true_id=1, k=3) == 0.0
 
 
@@ -38,6 +39,7 @@ def test_recall_not_found():
 
 def test_ndcg_rank1():
     import math
+
     assert ndcg_at_k([1, 2, 3], true_id=1, k=25) == pytest.approx(1.0 / math.log2(2))
 
 
@@ -57,8 +59,18 @@ def test_evaluator_update_and_compute():
 
 def test_evaluate_pipeline():
     predictions = [
-        {"predicted_ids": [1, 2, 3], "true_id": 1, "QuestionId_Answer": "q1_A", "SubjectName": "Number"},
-        {"predicted_ids": [2, 3, 4], "true_id": 1, "QuestionId_Answer": "q2_B", "SubjectName": "Algebra"},
+        {
+            "predicted_ids": [1, 2, 3],
+            "true_id": 1,
+            "QuestionId_Answer": "q1_A",
+            "SubjectName": "Number",
+        },
+        {
+            "predicted_ids": [2, 3, 4],
+            "true_id": 1,
+            "QuestionId_Answer": "q2_B",
+            "SubjectName": "Algebra",
+        },
     ]
     result = evaluate_pipeline(predictions, k=25)
     assert "overall" in result

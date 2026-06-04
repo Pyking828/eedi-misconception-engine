@@ -1,4 +1,5 @@
 """Data collators for retriever and reranker training."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ class EmbedCollator:
     Packs query + positives + negatives into a flat batch
     that FlagEmbedding / sentence-transformers trainer expects.
     """
+
     tokenizer: PreTrainedTokenizerBase
     max_seq_len: int = 512
     query_prompt: str = (
@@ -26,7 +28,7 @@ class EmbedCollator:
         queries = [self.query_prompt + f["query"] for f in features]
         positives = [f["pos"] for f in features]
 
-        # 展平所有 negatives
+        # Flatten all negatives
         all_texts = queries + positives
         for f in features:
             all_texts.extend(f.get("negs", []))
@@ -54,6 +56,7 @@ class RerankCollator:
     Collator for cross-encoder (pointwise reranker) training.
     Formats as: [CLS] query [SEP] candidate [SEP]
     """
+
     tokenizer: PreTrainedTokenizerBase
     max_seq_len: int = 1024
 

@@ -1,26 +1,27 @@
 """
-召回器（Bi-Encoder）模块。
-架构：Qwen3-Embedding-8B（最终主线）/ Qwen3-Embedding-0.6B（快速基线）+ LoRA + InfoNCE / MNRL
-向量库：FAISS CPU IndexFlatIP（2587 条 misconception，L2 归一化后等价余弦）
+Bi-encoder retriever module.
+
+Architecture: Qwen3-Embedding-8B (main) / 0.6B (baseline) + LoRA + InfoNCE / MNRL
+Index: FAISS CPU IndexFlatIP (2587 misconceptions; L2-normalized inner product = cosine).
 """
+
 from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Optional
 
 import faiss
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
-from peft import LoraConfig, TaskType, get_peft_model, PeftModel
 
 # ────────────────────────────────────────────────────────────
-# 1. 编码工具函数
+# 1. Encoding helpers
 # ────────────────────────────────────────────────────────────
 
 QUERY_PROMPT = (
@@ -30,7 +31,7 @@ QUERY_PROMPT = (
 
 
 def last_token_pool(hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-    """Decoder-only 模型用最后一个有效 token 的隐层作为 embedding（同 FlagEmbedding 方案）。"""
+    """Last valid token pooling for decoder-only models (FlagEmbedding style)."""
     seq_lens = attention_mask.sum(dim=1) - 1
     batch_size = hidden_states.size(0)
     return hidden_states[torch.arange(batch_size, device=hidden_states.device), seq_lens]
@@ -47,7 +48,7 @@ def encode_texts(
     normalize: bool = True,
     show_progress: bool = False,
 ) -> np.ndarray:
-    """批量编码文本，返回 (N, D) float32 numpy 数组。"""
+    """Encode texts; return (N, D) float32 numpy array."""
     model.eval()
     all_embs: list[np.ndarray] = []
     iterator = range(0, len(texts), batch_size)
@@ -64,7 +65,7 @@ def encode_texts(
             return_tensors="pt",
         ).to(device)
         out = model(**enc, output_hidden_states=False)
-        # 优先使用 last_hidden_state
+        # Prefer last_hidden_state
         if hasattr(out, "last_hidden_state"):
             emb = last_token_pool(out.last_hidden_state, enc["attention_mask"])
         else:
@@ -77,13 +78,14 @@ def encode_texts(
 
 
 # ────────────────────────────────────────────────────────────
-# 2. InfoNCE 损失
+# 2. InfoNCE loss
 # ────────────────────────────────────────────────────────────
+
 
 class InfoNCELoss(nn.Module):
     """
-    In-batch 对比学习损失（温度缩放余弦相似度 cross-entropy）。
-    等价于 MultipleNegativesRankingLoss，但温度可调。
+    In-batch contrastive loss (temperature-scaled cosine CE).
+    Equivalent to MultipleNegativesRankingLoss with tunable temperature.
     """
 
     def __init__(self, temperature: float = 0.02) -> None:
@@ -92,20 +94,20 @@ class InfoNCELoss(nn.Module):
 
     def forward(
         self,
-        query_embs: torch.Tensor,   # (B, D)
-        pos_embs: torch.Tensor,     # (B, D)
-        neg_embs: Optional[torch.Tensor] = None,  # (B*K, D) 可选
+        query_embs: torch.Tensor,  # (B, D)
+        pos_embs: torch.Tensor,  # (B, D)
+        neg_embs: torch.Tensor | None = None,  # (B*K, D) optional
     ) -> torch.Tensor:
-        # 归一化
+        # Normalize
         q = F.normalize(query_embs, p=2, dim=-1)
         p = F.normalize(pos_embs, p=2, dim=-1)
 
         if neg_embs is not None:
             n = F.normalize(neg_embs, p=2, dim=-1)
-            # candidates = [正例, 负例...]
+            # candidates = [positive, negatives...]
             candidates = torch.cat([p, n], dim=0)  # (B + B*K, D)
         else:
-            candidates = p  # 仅 in-batch negative
+            candidates = p  # in-batch negatives only
 
         logits = torch.matmul(q, candidates.T) / self.temperature  # (B, B or B+B*K)
         labels = torch.arange(len(q), device=q.device)
@@ -113,16 +115,17 @@ class InfoNCELoss(nn.Module):
 
 
 # ────────────────────────────────────────────────────────────
-# 3. FAISS 索引构建
+# 3. FAISS index
 # ────────────────────────────────────────────────────────────
+
 
 def build_faiss_index(
     embeddings: np.ndarray,
-    save_path: Optional[str | Path] = None,
+    save_path: str | Path | None = None,
 ) -> faiss.IndexFlatIP:
     """
-    构建 L2 归一化后的内积索引（等价余弦相似度）。
-    embeddings 应已 L2 归一化。
+    Build inner-product index on L2-normalized embeddings (cosine equivalent).
+    embeddings must already be L2-normalized.
     """
     d = embeddings.shape[1]
     index = faiss.IndexFlatIP(d)
@@ -138,14 +141,15 @@ def load_faiss_index(path: str | Path) -> faiss.IndexFlatIP:
 
 
 # ────────────────────────────────────────────────────────────
-# 4. EediRetriever：推理封装
+# 4. EediRetriever inference wrapper
 # ────────────────────────────────────────────────────────────
+
 
 class EediRetriever:
     """
-    推理时使用：给定 query 文本，返回 top-k MisconceptionId 列表。
+    Given query text, return top-k MisconceptionIds.
 
-    示例：
+    Example:
         retriever = EediRetriever.from_pretrained(
             model_name="Qwen/Qwen3-Embedding-8B",
             adapter_path="outputs/retriever/lora",
@@ -168,8 +172,8 @@ class EediRetriever:
         self.model = model.to(device)
         self.tokenizer = tokenizer
         self.index = index
-        self.misc_ids = misc_ids          # FAISS 行 i → MisconceptionId
-        self.misc_texts = misc_texts      # MisconceptionId → text
+        self.misc_ids = misc_ids  # FAISS row i → MisconceptionId
+        self.misc_texts = misc_texts  # MisconceptionId → text
         self.max_seq_len = max_seq_len
         self.device = device
 
@@ -180,16 +184,16 @@ class EediRetriever:
         index_path: str | Path,
         misc_ids: list[int],
         misc_texts: dict[int, str],
-        adapter_path: Optional[str | Path] = None,
+        adapter_path: str | Path | None = None,
         max_seq_len: int = 512,
         device: str = "cuda",
-        cache_dir: Optional[str] = None,
-    ) -> "EediRetriever":
+        cache_dir: str | None = None,
+    ) -> EediRetriever:
         tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
         model = AutoModel.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16,
-            attn_implementation="sdpa",  # Blackwell 安全方案
+            attn_implementation="sdpa",  # Blackwell-safe backend
             cache_dir=cache_dir,
         )
         if adapter_path is not None and Path(adapter_path).exists():
@@ -204,7 +208,7 @@ class EediRetriever:
         top_k: int = 50,
         with_scores: bool = False,
     ) -> list[int] | tuple[list[int], list[float]]:
-        """返回 top-k MisconceptionId（可含分数）。"""
+        """Return top-k MisconceptionIds (optionally with scores)."""
         query_text = QUERY_PROMPT + query
         emb = encode_texts(
             [query_text],
@@ -226,7 +230,7 @@ class EediRetriever:
         top_k: int = 50,
         batch_size: int = 32,
     ) -> list[list[int]]:
-        """批量召回，返回每条 query 的 top-k id 列表。"""
+        """Batch retrieve top-k id lists per query."""
         query_texts = [QUERY_PROMPT + q for q in queries]
         embs = encode_texts(
             query_texts,
@@ -242,18 +246,18 @@ class EediRetriever:
 
 
 # ────────────────────────────────────────────────────────────
-# 5. RetrieverTrainer：LoRA 微调
+# 5. RetrieverTrainer: LoRA fine-tuning
 # ────────────────────────────────────────────────────────────
+
 
 class RetrieverTrainer:
     """
-    LoRA + InfoNCE 微调召回器。
+    LoRA + InfoNCE retriever fine-tuning.
 
-    特点：
-    - 用 last-token pooling（decoder-only friendly）
-    - InfoNCE loss，温度 0.02（复刻第1名 & top-5 方案）
-    - 难负例挖掘在 EediDataset 层做，此处接收已挖掘的 DataLoader
-    - 保存 LoRA adapter（非完整权重，节省磁盘）
+    - last-token pooling (decoder-only friendly)
+    - InfoNCE temperature 0.02 (1st / top-5 style)
+    - hard negatives mined in EediDataset; consumes prepared DataLoader
+    - saves LoRA adapter only (disk-efficient)
     """
 
     def __init__(
@@ -263,14 +267,14 @@ class RetrieverTrainer:
         lora_alpha: int = 32,
         lora_dropout: float = 0.05,
         temperature: float = 0.02,
-        cache_dir: Optional[str] = None,
+        cache_dir: str | None = None,
         output_dir: str = "outputs/retriever",
     ) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.temperature = temperature
 
-        # 加载 base model
+        # Load base model
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -282,7 +286,7 @@ class RetrieverTrainer:
             cache_dir=cache_dir,
         )
 
-        # 注入 LoRA
+        # Inject LoRA
         lora_cfg = LoraConfig(
             task_type=TaskType.FEATURE_EXTRACTION,
             r=lora_r,
@@ -301,15 +305,15 @@ class RetrieverTrainer:
     def train(
         self,
         train_loader: DataLoader,
-        val_loader: Optional[DataLoader] = None,
+        val_loader: DataLoader | None = None,
         num_epochs: int = 3,
         lr: float = 2e-4,
         warmup_steps: int = 100,
         eval_every_n_steps: int = 200,
-        misc_embeddings: Optional[np.ndarray] = None,
-        misc_ids: Optional[list[int]] = None,
+        misc_embeddings: np.ndarray | None = None,
+        misc_ids: list[int] | None = None,
     ) -> list[dict]:
-        """训练并返回每个 epoch 的 loss / 指标历史。"""
+        """Train and return per-epoch loss / metric history."""
         from torch.optim import AdamW
         from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -326,8 +330,8 @@ class RetrieverTrainer:
             epoch_loss = 0.0
             t0 = time.time()
 
-            for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
-                # batch 结构由 EmbedCollator 决定
+            for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}"):
+                # batch layout from EmbedCollator
                 input_ids = batch["input_ids"].to(self.device)
                 attention_mask = batch["attention_mask"].to(self.device)
                 n_q = batch["n_queries"]
@@ -354,16 +358,18 @@ class RetrieverTrainer:
             elapsed = time.time() - t0
             record = {"epoch": epoch + 1, "loss": avg_loss, "elapsed_s": elapsed}
 
-            # 可选：每 epoch 末做 FAISS 检索评测
+            # Optional: FAISS retrieval eval at end of each epoch
             if val_loader is not None and misc_embeddings is not None:
                 map25 = self._quick_eval(val_loader, misc_embeddings, misc_ids or [])
                 record["MAP@25"] = map25
                 if map25 > best_map:
                     best_map = map25
                     self.save_adapter("best")
-                print(f"  Epoch {epoch+1}: loss={avg_loss:.4f}, MAP@25={map25:.4f}, time={elapsed:.0f}s")
+                print(
+                    f"  Epoch {epoch + 1}: loss={avg_loss:.4f}, MAP@25={map25:.4f}, time={elapsed:.0f}s"
+                )
             else:
-                print(f"  Epoch {epoch+1}: loss={avg_loss:.4f}, time={elapsed:.0f}s")
+                print(f"  Epoch {epoch + 1}: loss={avg_loss:.4f}, time={elapsed:.0f}s")
 
             history.append(record)
 

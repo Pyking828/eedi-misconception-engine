@@ -1,215 +1,267 @@
-# Eedi 数学错因诊断中控系统
+# Eedi Misconception Engine
 
-> **Misconception Mining Engine** — 企业级"召回→粗排→精排→推理 SubAgent"级联检索系统
-> 基于 Kaggle Eedi 竞赛（数学错因挖掘，MAP@25）× vivo 蓝心小v 中控3.0架构风格
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-green.svg)](https://fastapi.tiangolo.com/)
+[![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](docker-compose.yml)
+[![HF Hub](https://img.shields.io/badge/HF%20Hub-assets-yellow.svg)](https://huggingface.co/datasets/Pyking828/eedi-misconception-engine-assets)
+[![Kaggle](https://img.shields.io/badge/Kaggle-Eedi%20Misconceptions-20BEFF?logo=kaggle&logoColor=white)](https://www.kaggle.com/competitions/eedi-mining-misconceptions-in-mathematics)
 
-[![CI](https://github.com/YOUR_GITHUB/eedi-misconception-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_GITHUB/eedi-misconception-engine/actions)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+End-to-end **math misconception retrieval & diagnosis** system built on the Kaggle competition
+[**Eedi — Mining Misconceptions in Mathematics**](https://www.kaggle.com/competitions/eedi-mining-misconceptions-in-mathematics):
+given a question, the correct answer, and a student's wrong answer, rank the most likely
+misconception IDs from a fixed catalogue of 2587 (metric: MAP@25).
 
----
+This repo turns that into a production-shaped service: dense retrieval with LoRA-tuned 8B
+embeddings, pointwise + listwise reranking, cost-aware query routing, an async agent
+orchestrator with CoT reasoning, and FastAPI / Gradio / MCP serving — reaching **fold-0
+CV MAP@25 = 0.597** (≈ Kaggle private-LB top tier; the 1st place was 0.639).
 
-## 项目背景与定位
+<p align="center">
+  <img src="./assets/diagrams/architecture.png" alt="System architecture" width="880"/>
+</p>
 
-本项目基于 Kaggle **Eedi - Mining Misconceptions in Mathematics** 竞赛（1446 支队伍，$55,000 奖金），将其重构为一个**企业级中控风格的 AI 系统**：
+## Demo
 
-- **任务**：给定数学选择题 + 学生的错误选项，从 2587 条错因描述库中检索最匹配的错因（MAP@25）
-- **工程目标**：不只是冲榜，而是打造可落地、可面试讲解的全链路 AI 系统
+<p align="center">
+  <img src="./assets/demo/demo.gif" alt="Eedi misconception diagnosis demo" width="640"/>
+</p>
 
-### 岗位 JD → 项目模块映射（面试讲解用）
+Two ways to see it run:
 
-| JD 条目 | 对应模块 |
-|---------|---------|
-| 工具检索召回、排序模型优化 | `retriever/`（召回）+ `reranker/`（粗排/精排）三级级联 |
-| 智能路由，对 query 精准化调度 | `router/`：学科分类 + 成本感知升级 |
-| 主流程架构设计、prompt 调优管理 | `orchestrator.py` + `prompts/`（版本化 Jinja 模板 + A/B）|
-| 上游感知记忆 + 下游 mcp/subagent | `memory/`（SQLite）+ `mcp_server/` + `reasoner/`（CoT）|
-| asyncio/fastapi/函数注解 | `service/app.py`（全异步 + pydantic v2 + SSE）|
-| 30B内大模型 SFT + 强化学习（qwen）| LoRA SFT（召回/重排）+ **GRPO** 精排 |
-| 30B 内大模型做 Agent | DeepSeek-R1-Distill-Qwen-14B 线上推理/精排 + DeepSeek-R1-Distill-Qwen-32B 离线 teacher/judge/蒸馏增强 |
+- **Zero-setup live demo (persistent):** the [`spaces/`](spaces/) folder is a ready-to-deploy
+  Hugging Face Space — a lightweight **CPU** demo (`bge-m3` + FAISS retrieval over the 2587
+  misconceptions). It needs no GPU and stays up independently of any training box.
+- **Full GPU pipeline UI (local reproduction):** run the service yourself (see
+  [Reproduce inference](#reproduce-inference)) and the Gradio UI is served at **your own**
+  `http://localhost:6006/ui`. The demo GIF above was recorded on the author's GPU instance;
+  there is intentionally **no permanently hosted full-pipeline URL** — the UI lives only for
+  as long as *you* keep the service running, so anyone can reproduce it locally.
 
----
+> Why this design: the heavy 8B/14B models can't run on a free CPU Space, and a personal cloud
+> GPU instance is ephemeral. So the demo is split — a persistent CPU Space for the retrieval
+> experience, and a reproducible local Gradio frontend for the full cascade.
 
-## 系统架构
+## Highlights
 
+1. **RAG retrieval** — Qwen3-Embedding-8B + LoRA + FAISS; competition MAP@25 from ~0.22 (zero-shot) to **0.597** (3-model ensemble).
+2. **Intelligent routing** — subject classification + cost-aware dispatch (`retrieve_only` / `retrieve_rerank` / `full_pipeline`); SQLite memory cache for repeat queries.
+3. **Agent orchestration** — async `Orchestrator` chaining Router → Retriever → Pointwise → Listwise → CoT reasoner; versioned Jinja prompts; MCP JSON-RPC server; SSE streaming.
+4. **LoRA / SFT / RL stack** — retriever LoRA, Qwen3-Reranker-8B pointwise LoRA (31k & hn12), DeepSeek-R1-14B listwise SFT, plus a from-scratch GRPO experiment.
+
+## Architecture
+
+```mermaid
+flowchart TB
+  subgraph api [API Layer]
+    FastAPI[FastAPI /diagnose /search]
+    Gradio[Gradio /ui - local]
+    MCP[MCP JSON-RPC]
+  end
+
+  subgraph orch [Agent Orchestrator]
+    Mem[(SQLite Memory)]
+    Prompts[Prompt Registry]
+    Orch[Orchestrator]
+  end
+
+  subgraph route [Router]
+    Subj[Subject Classifier]
+    Cost[Cost-Aware Dispatcher]
+  end
+
+  subgraph rag [Retrieval & Reranking]
+    Emb[Qwen3-Embedding-8B + LoRA]
+    FAISS[FAISS top-50]
+    PW[Pointwise Reranker top-10]
+    LW[Listwise R1-14B top-5]
+    Ens[Score Ensemble]
+  end
+
+  FastAPI --> Orch
+  Gradio --> Orch
+  MCP --> Orch
+  Orch --> Mem
+  Orch --> Prompts
+  Orch --> Subj
+  Subj --> Cost
+  Cost --> Emb
+  Emb --> FAISS
+  FAISS --> PW
+  PW --> LW
+  LW --> Ens
+  Orch --> CoT[CoT Reasoner SubAgent]
 ```
-用户 Query（题目 + 正答 + 错答）
-         │
-         ▼
-┌─────────────────────────────┐
-│  智能路由 Router              │  学科分类 + 置信度 → 成本感知升级
-│  + 感知记忆 Memory            │  SQLite 缓存命中 → 直接返回
-└─────────────┬───────────────┘
-              │
-              ▼
-┌─────────────────────────────┐
-│  召回 Retriever              │  Qwen3-Embedding-8B + LoRA
-│  FAISS CPU IndexFlatIP      │  InfoNCE loss + 难负例挖掘
-│  top-50 候选                 │  MAP@25 / Recall@25 / nDCG@25
-└─────────────┬───────────────┘
-              │ [置信度低才升级]
-              ▼
-┌─────────────────────────────┐
-│  粗排 Pointwise              │  Qwen3-Reranker-8B + LoRA
-│  top-50 → top-10            │  cross-encoder 打分头
-└─────────────┬───────────────┘
-              │
-      ┌───────┴────────┐
-      │                │
-      ▼                ▼
-┌──────────┐    ┌───────────────────┐
-│ CoT      │    │ 精排 Listwise      │  DeepSeek-R1-Distill-Qwen-14B + LoRA/GRPO
-│ Reasoner │───▶│ top-10 → top-5    │  reward = nDCG@5 增益
-│ SubAgent │    └───────────────────┘
-└──────────┘
-              │
-              ▼
-       MAP@25 候选 + 推理解释
-              │
-    ┌─────────┴──────────┐
-    │    服务层            │
-    │  FastAPI (SSE)      │
-    │  Gradio Demo UI     │
-    │  MCP Server         │
-    └────────────────────┘
-```
 
----
+The pipeline narrows candidates at each stage while accuracy climbs:
 
-## 环境要求
+<p align="center">
+  <img src="./assets/diagrams/cascade.png" alt="Cascade funnel and MAP@25 climb" width="820"/>
+</p>
 
-| 组件 | 最低 | 推荐（本项目） |
-|------|------|--------------|
-| GPU | RTX 3090 24GB | RTX PRO 6000 Blackwell 96GB |
-| CUDA | 11.8+ | 12.8 |
-| Python | 3.10+ | 3.12.3 |
-| 磁盘 | 100GB | 500GB（数据盘）|
+## Results & experiment log
 
----
+All numbers are **fold-0 cross-validation** (874 validation queries), same eval protocol
+across stages. The competition metric is MAP@25.
 
-## 快速上手
+### The climb (0.22 → 0.597)
 
-### 1. 克隆并安装
+| Stage | MAP@25 | Recall@25 | Δ |
+|-------|:------:|:---------:|:--:|
+| Retriever 8B zero-shot | 0.2248 | 0.6535 | — |
+| Retriever 8B LoRA (real data) | 0.4289 | 0.9416 | +0.204 |
+| Pointwise reranker · 6k pairs | 0.4707 | 0.9153 | +0.042 |
+| Pointwise reranker · 24k pairs | 0.5244 | 0.9142 | +0.054 |
+| Pointwise reranker · 31k pairs | 0.5700 | 0.9211 | +0.046 |
+| 31k + baseline-pool rescoring | 0.5807 | 0.9611 | +0.011 |
+| hn12 + baseline-pool rescoring | 0.5842 | 0.9588 | +0.003 |
+| 2-model ensemble | 0.5950 | 0.9611 | +0.011 |
+| **3-model ensemble (final)** | **0.5974** | 0.9611 | +0.002 |
+
+### Ablations & lessons learned
+
+**1. Recall saturates early — MAP is a *ranking* problem.**
+LoRA fine-tuning lifts Recall@25 from 0.65 → 0.94 almost immediately. After that the gold
+misconception is *in* the top-50 ~96% of the time, so every later point of MAP comes from
+**ordering**, not from finding more candidates. That's why the budget went into rerankers,
+not a bigger retriever.
+
+**2. Pointwise reranker quality is dominated by training-pair count/quality.**
+6k → 24k → 31k hard-negative pairs: 0.47 → 0.52 → 0.57. The single biggest lever after
+the retriever was simply mining more, harder negatives.
+
+**3. Listwise helps only with the *option-logit* trick.**
+Generative listwise ranking was poor zero-shot (MAP@25 ≈ 0.33). Reframing it as a single
+forward pass that reads the **logits of the option-label tokens** (A…J) and SFT-ing on the
+gold label is what made the R1-14B listwise stage competitive (0.572) — but it still only
+*matches* a strong pointwise reranker, so it earns its place mainly as ensemble diversity.
+
+**4. RL (GRPO) did not beat SFT — an honest negative result.**
+
+| Method | MAP@25 |
+|--------|:------:|
+| Listwise zero-shot | 0.3254 |
+| Listwise SFT (8B) | 0.5700 |
+| Listwise SFT (R1-14B) | 0.5717 |
+| GRPO v1 (top-1 hit reward) | 0.5700 |
+| GRPO v2 (nDCG-gain reward) | **0.5741** |
+
+A from-scratch GRPO objective (group-relative advantage + KL to a frozen SFT reference,
+implemented directly because TRL's `GRPOTrainer` breaks on Blackwell `sm_120`) reached
+0.5741 vs. 0.5737 for the SFT policy — i.e. **~0 lift for a lot of added complexity**. The
+denser nDCG-gain reward beat the sparse top-1-hit reward, which is the one transferable
+takeaway. SFT remains the strong, cheap baseline.
+
+**5. Score fusion / scaling didn't help — keep it simple.**
+Sweeping a blend factor that mixes retrieval similarity into the rerank score was best at
+`factor = 1.0` (pure rerank score, MAP 0.5714); every blend made it worse. The reranker's
+own score is already well-calibrated for ordering.
+
+**6. Ensemble = diversity, weighted toward the strongest model.**
+Final ensemble of `pointwise-hn8` + `pointwise-hn12` + `listwise-R1-14B` with weights
+**0.25 / 0.50 / 0.25** gave **+0.013** over the best single model (0.5842 → 0.5974).
+
+**7. Seen vs. unseen misconceptions — where the system is fragile.**
+
+| Model | Seen (n=639) | Unseen (n=235) | All (n=874) |
+|-------|:------------:|:--------------:|:-----------:|
+| Retriever (real-only) | 0.4173 | **0.4604** | 0.4289 |
+| Pointwise reranker (31k) | **0.6145** | 0.4496 | 0.5702 |
+
+The reranker is dramatically stronger on misconceptions it saw in training (0.61) than on
+unseen ones (0.45), while the **retriever actually generalizes *better* to unseen**
+misconceptions than to seen ones. Practical implication: for novel/rare misconceptions,
+trust the retriever; the reranker's gains concentrate on the seen distribution. This is also
+why synthetic-data multistage pretraining was explored — to push unseen coverage — though in
+our runs it only modestly traded overall MAP for unseen robustness, so it stayed off the
+mainline.
+
+## Tech stack
+
+| Layer | Stack |
+|-------|--------|
+| API | FastAPI, Pydantic v2, SSE, Gradio |
+| Models | Qwen3-Embedding/Reranker-8B, DeepSeek-R1-Distill-Qwen-14B |
+| Training | PEFT LoRA, custom GRPO, FlagEmbedding |
+| Index | FAISS IndexFlatIP |
+| Memory | aiosqlite |
+| Ops | Docker, docker-compose, GitHub Actions (ruff/pytest) |
+
+## Reproduce inference
+
+### Path A — Manual (local GPU)
 
 ```bash
-git clone https://github.com/YOUR_GITHUB/eedi-misconception-engine.git
+git clone https://github.com/Pyking828/eedi-misconception-engine.git
 cd eedi-misconception-engine
-
-# 设置环境变量（重定向所有缓存到数据盘）
-export HF_HOME=/root/autodl-tmp/hf_cache
-export EEDI_DATA=/root/autodl-tmp/eedi-data
-
 pip install -e .
-```
 
-### 2. 下载数据
+# LoRA + FAISS index (~350 MB, no base weights)
+bash scripts/download_adapters.sh
 
-```bash
-# 需要 Kaggle 账号并在比赛页接受规则
-# https://www.kaggle.com/competitions/eedi-mining-misconceptions-in-mathematics
-kaggle competitions download -c eedi-mining-misconceptions-in-mathematics -p $EEDI_DATA
-unzip $EEDI_DATA/eedi-mining-misconceptions-in-mathematics.zip -d $EEDI_DATA
-```
+# Base models (local or mirror)
+export HF_HOME=../hf_cache
+huggingface-cli download Qwen/Qwen3-Embedding-8B
+huggingface-cli download Qwen/Qwen3-Reranker-8B
 
-### 3. 数据预处理 & EDA
+# Point configs/base.yaml paths to your eedi-data/ and outputs/
 
-```bash
-python scripts/00_eda.py
-```
+# Light mode (API skeleton, no GPU models)
+export EEDI_LIGHT=1
+uvicorn service.app:app --host 0.0.0.0 --port 6006
 
-### 4. 构建召回基线（零样本）
-
-```bash
-python scripts/01_retriever_baseline.py --fold 0
-```
-
-### 5. LoRA 微调召回器
-
-```bash
-python scripts/01_retriever_baseline.py --fold 0 --train
-python scripts/05_build_index.py --model Qwen/Qwen3-Embedding-8B --adapter-path outputs/retriever/lora_best_8b
-```
-
-### 6. 合成数据生成（可选，需要大模型）
-
-```bash
-python scripts/02_synth_data.py --teacher deepseek-ai/DeepSeek-R1-Distill-Qwen-14B --n 5
-```
-
-### 7. 重排训练
-
-```bash
-python scripts/03_reranker_train.py --stage both
-```
-
-### 8. GRPO 强化学习
-
-```bash
-python scripts/04_grpo_train.py --reward ndcg_gain
-```
-
-### 9. 启动服务
-
-```bash
-# FastAPI + Gradio（端口 6006）
-make serve
-# 或：
+# Full GPU pipeline
+export EEDI_LIGHT=0
+export EEDI_FORCE_FULL=1   # optional: always run rerank + CoT for demos
 uvicorn service.app:app --host 0.0.0.0 --port 6006
 ```
 
-访问：
-- **Gradio UI**：`http://localhost:6006/ui`
-- **API 文档**：`http://localhost:6006/docs`
-- **健康检查**：`http://localhost:6006/health`
-
----
-
-## 离线指标（消融实验）
-
-| 阶段 | 方法 | Recall@25 | MAP@25 | nDCG@25 |
-|------|------|-----------|--------|---------|
-| 快速基线 | Qwen3-Embedding-0.6B 零样本/LoRA | 0.8146(Fold0) | 0.3172(Fold0) | 0.4280(Fold0) |
-| 最终主线 | Qwen3-Embedding-8B zero-shot | 0.6535(5折均值) | 0.2248(5折均值) | 0.3194(5折均值) |
-| 最终主线 | Qwen3-Embedding-8B LoRA | 0.8822(Fold0) | 0.4012(Fold0) | 0.5102(Fold0) |
-| 候选池 | Qwen3-Embedding-8B LoRA top-50 | **0.9700(Recall@50)** | - | - |
-| 阶段1 | + LoRA + InfoNCE 微调 | - | - | - |
-| 阶段2 | + 合成数据（DeepSeek-R1-Distill-Qwen-14B 教师） | - | - | - |
-| 阶段3 | + 粗排 + 精排（SFT）| - | - | - |
-| 阶段4 | + GRPO 强化学习 | - | - | - |
-
-> 指标在实验执行后更新（见 `note.md`）
-
----
-
-## MCP 接入配置
-
-在 Cursor 或 Claude Desktop 中添加（`.cursor/mcp.json`）：
-
-```json
-{
-  "mcpServers": {
-    "eedi-misconception-engine": {
-      "command": "python",
-      "args": ["/path/to/eedi-misconception-engine/mcp_server/server.py"],
-      "env": {
-        "HF_HOME": "/root/autodl-tmp/hf_cache"
-      }
-    }
-  }
-}
-```
-
-可用工具：
-- `diagnose_misconception`：完整诊断（召回→重排→CoT）
-- `search_misconceptions`：纯向量检索
-- `get_misconception_detail`：查询错因详情
-
----
-
-## API 参考
+Once it's running **on your machine**, open `http://localhost:6006/docs` (Swagger) or
+`http://localhost:6006/ui` (the full Gradio UI). For a one-command full-pipeline demo with an
+optional temporary public tunnel:
 
 ```bash
-# 错因诊断
+python scripts/demo_share.py            # serves http://localhost:6006/ui
+EEDI_SHARE=1 python scripts/demo_share.py   # also opens a ~72h *.gradio.live tunnel
+```
+
+### Path B — Docker
+
+```bash
+git clone https://github.com/Pyking828/eedi-misconception-engine.git
+cd eedi-misconception-engine
+
+# Mount local hf_cache, eedi-data, outputs (create ../hf_cache if needed)
+docker compose up --build
+```
+
+Set `EEDI_LIGHT=0` in `docker-compose.yml` when GPU weights are mounted under `/data/hf_cache`.
+
+### Assets on Hugging Face
+
+Pre-trained adapters and index (no base models):
+**[Pyking828/eedi-misconception-engine-assets](https://huggingface.co/datasets/Pyking828/eedi-misconception-engine-assets)**
+
+| Path | Description |
+|------|-------------|
+| `retriever/` | Qwen3-Embedding-8B LoRA |
+| `reranker_best31k/` | Qwen3-Reranker-8B LoRA (hn8) |
+| `reranker_hn12/` | Qwen3-Reranker-8B LoRA (hn12) |
+| `listwise_r1_14b/` | R1-14B listwise SFT LoRA |
+| `index/` | FAISS index, `misc_embs.npy`, `misc_ids.json`, mapping CSV |
+
+## Reproduce training
+
+See **[docs/TRAINING.md](docs/TRAINING.md)** for the full script order
+(`prepare_data` → retriever → synth → reranker → listwise → GRPO → ensemble → serving).
+You need your own GPU and the
+[competition dataset](https://www.kaggle.com/competitions/eedi-mining-misconceptions-in-mathematics/data)
+under `eedi-data/`.
+
+## API reference
+
+### `POST /diagnose`
+
+```bash
 curl -X POST http://localhost:6006/diagnose \
   -H "Content-Type: application/json" \
   -d '{
@@ -219,70 +271,54 @@ curl -X POST http://localhost:6006/diagnose \
     "subject_name": "Number",
     "top_k": 10
   }'
-
-# SSE 流式
-curl -X POST http://localhost:6006/diagnose/stream \
-  -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream" \
-  -d '{"question_text": "...", "correct_answer": "...", "wrong_answer": "..."}'
 ```
 
----
+### `POST /search` (retrieval only)
 
-## 项目结构
+```bash
+curl -X POST http://localhost:6006/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "fraction addition wrong denominator", "top_k": 5}'
+```
+
+### `GET /health`
+
+```bash
+curl http://localhost:6006/health
+```
+
+### `POST /diagnose/stream` (SSE)
+
+Stream events: `candidates` → `rationale_token` → `final`.
+
+## Project structure
 
 ```
 eedi-misconception-engine/
-├── src/eedi/
-│   ├── data/           # 数据加载 / 长表转换 / 5折CV
-│   ├── retriever/      # 召回器（Qwen3-Embedding + FAISS + LoRA）
-│   ├── reranker/       # 粗排(Pointwise) + 精排(Listwise) + GRPO
-│   ├── reasoner/       # CoT 推理 SubAgent
-│   ├── router/         # 智能路由（学科分类 + 成本感知）
-│   ├── synth/          # 合成数据生成（vLLM + LLM-as-judge）
-│   ├── memory/         # 感知记忆（SQLite 缓存/反馈/难负例）
-│   └── orchestrator.py # 中控主流程（异步串联）
-├── service/
-│   └── app.py          # FastAPI 异步服务 + Gradio UI
-├── mcp_server/
-│   └── server.py       # MCP stdio 服务
-├── eval/
-│   └── evaluator.py    # MAP@25 / Recall@K / nDCG@K
-├── scripts/            # 各阶段训练脚本
-├── prompts/            # 版本化 Jinja 模板
-├── configs/            # OmegaConf/Hydra YAML 配置
-├── tests/              # pytest 单元测试
-├── spaces/             # HuggingFace Spaces（免费 CPU demo）
-├── docs/               # 技术复盘 + JD面试稿
-├── note.md             # 端到端操作日志（面试复盘用）
-├── Makefile
-└── pyproject.toml
+├── assets/
+│   ├── demo/             # README demo GIF / MP4
+│   └── diagrams/         # architecture & cascade diagrams
+├── configs/base.yaml     # paths and hyperparameters
+├── docs/TRAINING.md      # training pipeline
+├── eval/                 # MAP@25 / Recall / nDCG evaluator
+├── mcp_server/           # MCP JSON-RPC server
+├── prompts/              # Jinja templates (listwise, reasoner)
+├── scripts/              # data prep, train, eval, serve (un-numbered, descriptive names)
+├── service/app.py        # FastAPI + Gradio
+├── spaces/               # deployable HF Spaces CPU demo
+├── src/eedi/             # retriever, reranker, router, orchestrator, memory, synth, reasoner
+├── tests/
+├── Dockerfile
+└── docker-compose.yml
 ```
 
----
+## References
 
-## 技术复盘（经验）
-
-详见 [`note.md`](note.md) 和 [`docs/`](docs/) 目录。
-
-关键技术沉淀：
-1. **sm_120 Blackwell 兼容性**：flash-attn 不支持 sm_120，改用 PyTorch SDPA，性能无损
-2. **InfoNCE vs MNRL**：InfoNCE（τ=0.02）比 MNRL 在本任务提升 MAP@25 约 0.02
-3. **未见错因分数缩放**：对训练集出现过的 misconception 乘 0.4，显著提升对新错因的召回（复刻3rd place）
-4. **GRPO reward 选择**：nDCG@5 连续奖励比 top1_hit 0/1 奖励梯度更丰富，训练更稳
-
----
-
-## 参考资料
-
-- [Kaggle 比赛主页](https://www.kaggle.com/competitions/eedi-mining-misconceptions-in-mathematics)
-- [1st Place 解法（Raja Biswas）](https://github.com/rbiswasfc/eedi-mining-misconceptions)
-- [5th Place 解法](https://github.com/ebinan92/Eedi-5th-solution)
+- [Kaggle: Eedi — Mining Misconceptions in Mathematics](https://www.kaggle.com/competitions/eedi-mining-misconceptions-in-mathematics) — original competition, data, and task definition
+- [1st place solution (Raja Biswas)](https://github.com/rbiswasfc/eedi-mining-misconceptions) and its [detailed write-up](https://www.kaggle.com/competitions/eedi-mining-misconceptions-in-mathematics/writeups/mth-101-1st-place-detailed-solution)
+- [Qwen-Agent](https://github.com/QwenLM/Qwen-Agent)
 - [FlagEmbedding](https://github.com/FlagOpen/FlagEmbedding)
-- [TRL GRPOTrainer](https://huggingface.co/docs/trl/grpo_trainer)
-
----
 
 ## License
 
-MIT License — 见 [LICENSE](LICENSE)
+MIT

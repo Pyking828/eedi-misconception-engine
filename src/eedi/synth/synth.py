@@ -1,27 +1,28 @@
 """
-合成数据生成模块（复刻 Top-1/2/3 方案的关键差距来源）。
+Synthetic data generation (key gap vs top Kaggle solutions).
 
-功能：
-1. SynthDataGenerator：用 vLLM（本地 DeepSeek-R1-Distill-Qwen-32B）生成未见错因的 MCQ
-2. MisconceptionExpander：扩写错因描述（提升 embedding 空间的区分度）
-3. CoTDataGenerator：生成 CoT 推理轨迹（供精排 SFT 和 GRPO 使用）
-4. LLM-as-Judge 质检：过滤低质量合成数据
+1. SynthDataGenerator: vLLM / 32B teacher MCQs for unseen misconceptions
+2. MisconceptionExpander: expand misconception text for embedding separability
+3. CoTDataGenerator: CoT traces for listwise SFT / GRPO
+4. LLM-as-Judge: filter low-quality synth rows
 
-三种 Prompt 均有版本化模板（存放于 prompts/ 目录），与 prompt 管理模块集成。
+Versioned prompts live under prompts/ and integrate with PromptRegistry.
 """
+
 from __future__ import annotations
 
 import json
-import re
-import time
 from pathlib import Path
-from typing import Optional
 
 import polars as pl
 
+try:  # vLLM path (Blackwell sm_120 FlashInfer incompatible; see scripts/synth_data.py for transformers)
+    from vllm import SamplingParams
+except ImportError:  # pragma: no cover
+    SamplingParams = None  # type: ignore[assignment, misc]
 
 # ─────────────────────────────────────────────
-# 1. Prompt 模板（硬编码备份，prompts/ 目录有 Jinja 版本）
+# 1. Prompt templates (hardcoded backup; Jinja versions in prompts/)
 # ─────────────────────────────────────────────
 
 MCQ_GEN_SYSTEM = """You are an expert mathematics question designer. Generate diagnostic Multiple Choice Questions (MCQs) that reveal specific student misconceptions.
@@ -68,13 +69,14 @@ Output format: {"score": <int>, "reason": "<one sentence>"}"""
 
 
 # ─────────────────────────────────────────────
-# 2. SynthDataGenerator（vLLM 驱动）
+# 2. SynthDataGenerator (vLLM)
 # ─────────────────────────────────────────────
+
 
 class SynthDataGenerator:
     """
-    使用 vLLM 本地大模型生成合成 MCQ。
-    目标：覆盖训练集中未见的 misconception，提升泛化能力。
+    Generate synthetic MCQs with local vLLM.
+    Goal: cover misconceptions unseen in training for better generalization.
     """
 
     def __init__(
@@ -82,7 +84,7 @@ class SynthDataGenerator:
         model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
         gpu_memory_utilization: float = 0.80,
         max_model_len: int = 4096,
-        cache_dir: Optional[str] = None,
+        cache_dir: str | None = None,
     ) -> None:
         from vllm import LLM, SamplingParams
 
@@ -105,16 +107,17 @@ class SynthDataGenerator:
         misconceptions: list[str],
         reference_examples: dict[str, list[dict]],
         n_per_misconception: int = 5,
-        output_path: Optional[str | Path] = None,
+        output_path: str | Path | None = None,
     ) -> list[dict]:
-        """批量生成 MCQ，返回 JSONL 格式的记录列表。"""
+        """Batch-generate MCQs; return list of JSONL-style records."""
         prompts = []
         misc_names = []
         for misc_name in misconceptions:
             examples = reference_examples.get(misc_name, [])
-            ex_str = "\n".join(
-                json.dumps(ex, ensure_ascii=False) for ex in examples[:3]
-            ) or "No examples available."
+            ex_str = (
+                "\n".join(json.dumps(ex, ensure_ascii=False) for ex in examples[:3])
+                or "No examples available."
+            )
             prompt = self._build_chat_prompt(
                 MCQ_GEN_SYSTEM,
                 MCQ_GEN_USER.format(
@@ -155,7 +158,7 @@ class SynthDataGenerator:
         records: list[dict],
         threshold: float = 6.0,
     ) -> list[dict]:
-        """用同一大模型对合成数据打分，过滤低质量样本。"""
+        """Score synthetic rows with the same model; filter low quality."""
         prompts = []
         for rec in records:
             judge_prompt = self._build_chat_prompt(
@@ -182,7 +185,7 @@ class SynthDataGenerator:
 
     @staticmethod
     def _build_chat_prompt(system: str, user: str) -> str:
-        """Qwen chat template（简化版，不依赖 tokenizer）。"""
+        """Qwen chat template (simplified, no tokenizer dependency)."""
         return (
             f"<|im_start|>system\n{system}<|im_end|>\n"
             f"<|im_start|>user\n{user}<|im_end|>\n"
@@ -194,14 +197,15 @@ class SynthDataGenerator:
 # 3. MisconceptionExpander
 # ─────────────────────────────────────────────
 
+
 class MisconceptionExpander:
-    """扩写 misconception 描述文本（复刻 2nd place 方案）。"""
+    """Expand misconception description text (2nd-place style)."""
 
     def __init__(
         self,
         model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
         gpu_memory_utilization: float = 0.80,
-        cache_dir: Optional[str] = None,
+        cache_dir: str | None = None,
     ) -> None:
         from vllm import LLM, SamplingParams
 
@@ -219,7 +223,7 @@ class MisconceptionExpander:
         misconceptions: list[str],
         batch_size: int = 32,
     ) -> dict[str, str]:
-        """返回 {original_text: expanded_text} 字典。"""
+        """Return {original_text: expanded_text}."""
         results: dict[str, str] = {}
         for i in range(0, len(misconceptions), batch_size):
             batch = misconceptions[i : i + batch_size]
@@ -240,18 +244,18 @@ class MisconceptionExpander:
 
 
 # ─────────────────────────────────────────────
-# 4. 数据集整合工具
+# 4. Dataset merge utilities
 # ─────────────────────────────────────────────
+
 
 def merge_real_and_synth(
     real_long_df: pl.DataFrame,
     synth_records: list[dict],
     misconception_df: pl.DataFrame,
 ) -> pl.DataFrame:
-    """将合成数据转为相同 schema 的 long_df，并 concat 到真实数据。"""
+    """Convert synth JSONL to long_df schema and concat with real data."""
     misc_id_map: dict[str, int] = {
-        r["MisconceptionName"]: r["MisconceptionId"]
-        for r in misconception_df.iter_rows(named=True)
+        r["MisconceptionName"]: r["MisconceptionId"] for r in misconception_df.iter_rows(named=True)
     }
 
     rows = []
@@ -262,7 +266,7 @@ def merge_real_and_synth(
             continue
         rows.append(
             {
-                "QuestionId": -(i + 1),          # 负数标记为合成
+                "QuestionId": -(i + 1),  # negative id marks synthetic
                 "QuestionId_Answer": f"synth_{i}",
                 "Answer": "A",
                 "SubjectName": rec.get("SubjectName", ""),
@@ -279,7 +283,7 @@ def merge_real_and_synth(
                     f"Correct Answer: {rec.get('CorrectAnswerText', '')}\n"
                     f"Incorrect Answer: {rec.get('WrongAnswerText', '')}"
                 ),
-                "fold": -1,  # 合成数据只用于训练，不参与验证
+                "fold": -1,  # synthetic rows: train only, not in CV
                 "is_synth": True,
             }
         )

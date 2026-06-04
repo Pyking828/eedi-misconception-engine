@@ -1,20 +1,19 @@
 """
-基于 sentence-transformers 的召回引擎（生产主引擎，稳健）。
+Sentence-transformers retrieval engine (production default).
 
-为什么用 sentence-transformers 而非手写 AutoModel：
-- Qwen3-Embedding 需要正确的 last-token pooling + L2 归一化 + query/document 指令前缀
-- ST 原生支持上述全部，且无缝集成 PEFT LoRA 训练
-- 手写实现（src/eedi/retriever/retriever.py 的 InfoNCELoss/last_token_pool）保留作为
-  "理解内部原理" 的教学参考
+Why ST instead of raw AutoModel:
+- Qwen3-Embedding needs last-token pooling, L2 norm, and query/document prompts
+- ST supports all of the above and PEFT LoRA training
+- Hand-rolled code in retriever.py remains as a teaching reference
 
-主线：Qwen3-Embedding-8B（embed_dim=4096，prompts={'query','document'}）
-基线：Qwen3-Embedding-0.6B（embed_dim=1024）
+Main: Qwen3-Embedding-8B (embed_dim=4096, prompts query/document)
+Baseline: Qwen3-Embedding-0.6B (embed_dim=1024)
 """
+
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
 
 import faiss
 import numpy as np
@@ -24,11 +23,11 @@ os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 def load_st_model(
     model_name: str,
-    adapter_path: Optional[str | Path] = None,
+    adapter_path: str | Path | None = None,
     device: str = "cuda",
     cache_dir: str = "/root/autodl-tmp/hf_cache",
 ):
-    """加载 SentenceTransformer（可选合并 LoRA adapter）。"""
+    """Load SentenceTransformer (optionally merge LoRA adapter)."""
     from sentence_transformers import SentenceTransformer
 
     model = SentenceTransformer(
@@ -38,8 +37,9 @@ def load_st_model(
         model_kwargs={"torch_dtype": "bfloat16", "attn_implementation": "sdpa"},
     )
     if adapter_path is not None and Path(adapter_path).exists():
-        # ST 会把 transformer backbone 暴露在 model[0].auto_model
+        # ST exposes backbone at model[0].auto_model
         from peft import PeftModel
+
         backbone = model[0].auto_model
         merged = PeftModel.from_pretrained(backbone, str(adapter_path)).merge_and_unload()
         model[0].auto_model = merged
@@ -49,11 +49,11 @@ def load_st_model(
 def st_encode(
     model,
     texts: list[str],
-    prompt_name: Optional[str] = None,
+    prompt_name: str | None = None,
     batch_size: int = 64,
     show_progress: bool = False,
 ) -> np.ndarray:
-    """编码文本，返回 L2 归一化的 float32 矩阵。"""
+    """Encode texts; return L2-normalized float32 matrix."""
     prompts = getattr(model, "prompts", {}) or {}
     use_prompt = prompt_name if prompt_name in prompts else None
     embs = model.encode(
@@ -67,7 +67,9 @@ def st_encode(
     return embs.astype(np.float32)
 
 
-def build_faiss_index(embeddings: np.ndarray, save_path: Optional[str | Path] = None) -> faiss.IndexFlatIP:
+def build_faiss_index(
+    embeddings: np.ndarray, save_path: str | Path | None = None
+) -> faiss.IndexFlatIP:
     d = embeddings.shape[1]
     index = faiss.IndexFlatIP(d)
     index.add(embeddings.astype(np.float32))
@@ -79,16 +81,18 @@ def build_faiss_index(embeddings: np.ndarray, save_path: Optional[str | Path] = 
 
 class STRetriever:
     """
-    生产推理用召回器（service 层使用）。
+    Production retriever used by the service layer.
 
-    示例：
+    Example:
         r = STRetriever.from_pretrained("Qwen/Qwen3-Embedding-8B",
                 index_path="...", misc_ids=[...], misc_texts={...},
                 adapter_path="outputs/retriever/lora_best_8b")
         ids, scores = r.retrieve("query text", top_k=50)
     """
 
-    def __init__(self, model, index: faiss.IndexFlatIP, misc_ids: list[int], misc_texts: dict[int, str]) -> None:
+    def __init__(
+        self, model, index: faiss.IndexFlatIP, misc_ids: list[int], misc_texts: dict[int, str]
+    ) -> None:
         self.model = model
         self.index = index
         self.misc_ids = misc_ids
@@ -101,10 +105,10 @@ class STRetriever:
         index_path: str | Path,
         misc_ids: list[int],
         misc_texts: dict[int, str],
-        adapter_path: Optional[str | Path] = None,
+        adapter_path: str | Path | None = None,
         device: str = "cuda",
         cache_dir: str = "/root/autodl-tmp/hf_cache",
-    ) -> "STRetriever":
+    ) -> STRetriever:
         model = load_st_model(model_name, adapter_path, device, cache_dir)
         index = faiss.read_index(str(index_path))
         return cls(model, index, misc_ids, misc_texts)
@@ -117,7 +121,11 @@ class STRetriever:
             return ids, scores[0].tolist()
         return ids
 
-    def batch_retrieve(self, queries: list[str], top_k: int = 50, batch_size: int = 64) -> list[list[int]]:
-        embs = st_encode(self.model, queries, prompt_name="query", batch_size=batch_size, show_progress=True)
+    def batch_retrieve(
+        self, queries: list[str], top_k: int = 50, batch_size: int = 64
+    ) -> list[list[int]]:
+        embs = st_encode(
+            self.model, queries, prompt_name="query", batch_size=batch_size, show_progress=True
+        )
         scores, idxs = self.index.search(embs, top_k)
         return [[self.misc_ids[j] for j in row] for row in idxs]

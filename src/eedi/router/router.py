@@ -1,21 +1,16 @@
 """
-智能路由模块（复刻 vivo 蓝心小v 中控 3.0 "智能路由" JD 要点）。
+Query router (subject classification, cost-aware pipeline, memory cache).
 
-路由决策：
-1. 学科分类（keyword / 未来可升级为 embedding 分类器）
-2. 成本感知升级：召回置信度低于阈值才触发重排/推理
-   - 置信度 = top-1 召回分数 vs top-2 分数之差（gap），gap 大 → 高置信，可跳过重排
-3. 感知记忆：查询 SQLite，命中缓存则直接返回
-
-这与 JD "对 query 做精准化调度、提升小v使用体验" 完全对应。
+1. Subject via keywords (future: embedding classifier)
+2. Cost-aware: rerank/reason only when retrieval confidence is low
+   - confidence uses top-1 score and gap vs top-2
+3. Memory: return cached result on hit
 """
+
 from __future__ import annotations
 
-import asyncio
-import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 
 class SubjectCategory(str, Enum):
@@ -28,64 +23,107 @@ class SubjectCategory(str, Enum):
 
 SUBJECT_KEYWORDS: dict[SubjectCategory, list[str]] = {
     SubjectCategory.NUMBER: [
-        "fraction", "decimal", "integer", "arithmetic", "ratio", "percentage",
-        "prime", "factor", "multiple", "square root", "cube", "power",
+        "fraction",
+        "decimal",
+        "integer",
+        "arithmetic",
+        "ratio",
+        "percentage",
+        "prime",
+        "factor",
+        "multiple",
+        "square root",
+        "cube",
+        "power",
     ],
     SubjectCategory.ALGEBRA: [
-        "equation", "inequality", "expression", "variable", "polynomial",
-        "quadratic", "linear", "algebra", "formula", "expand", "factorise",
-        "simplify", "substitut",
+        "equation",
+        "inequality",
+        "expression",
+        "variable",
+        "polynomial",
+        "quadratic",
+        "linear",
+        "algebra",
+        "formula",
+        "expand",
+        "factorise",
+        "simplify",
+        "substitut",
     ],
     SubjectCategory.GEOMETRY: [
-        "angle", "triangle", "circle", "polygon", "area", "perimeter",
-        "volume", "surface", "coordinate", "vector", "transformation",
-        "rotation", "reflection", "translation", "geometry", "congruent",
+        "angle",
+        "triangle",
+        "circle",
+        "polygon",
+        "area",
+        "perimeter",
+        "volume",
+        "surface",
+        "coordinate",
+        "vector",
+        "transformation",
+        "rotation",
+        "reflection",
+        "translation",
+        "geometry",
+        "congruent",
     ],
     SubjectCategory.DATA: [
-        "mean", "median", "mode", "range", "probability", "statistics",
-        "graph", "histogram", "frequency", "cumulative", "quartile", "data",
+        "mean",
+        "median",
+        "mode",
+        "range",
+        "probability",
+        "statistics",
+        "graph",
+        "histogram",
+        "frequency",
+        "cumulative",
+        "quartile",
+        "data",
     ],
 }
 
 
 class PipelineMode(str, Enum):
-    """路由决策的执行模式（成本从低到高）。"""
-    RETRIEVE_ONLY = "retrieve_only"          # 仅召回，极高置信
-    RETRIEVE_RERANK = "retrieve_rerank"      # 召回 + 粗排（默认）
-    FULL_PIPELINE = "full_pipeline"          # 召回 + 粗排 + 精排 + CoT 推理（最强）
+    """Pipeline mode (lowest to highest cost)."""
+
+    RETRIEVE_ONLY = "retrieve_only"  # retrieve only, very high confidence
+    RETRIEVE_RERANK = "retrieve_rerank"  # retrieve + pointwise (default)
+    FULL_PIPELINE = "full_pipeline"  # retrieve + pointwise + listwise + CoT
 
 
 @dataclass
 class RoutingDecision:
     subject: SubjectCategory
     mode: PipelineMode
-    confidence: float          # 召回置信度（0-1）
+    confidence: float  # retrieval confidence (0-1)
     from_cache: bool = False
-    cached_result: Optional[list[int]] = None
+    cached_result: list[int] | None = None
     metadata: dict = field(default_factory=dict)
 
 
 class QueryRouter:
-    """
-    中控路由器。
+    """Query router.
 
-    示例：
+    Example:
         router = QueryRouter(cost_threshold=0.7, memory=memory_module)
-        decision = await router.route(query, retriever_scores=[0.95, 0.60, ...])
+        decision = await router.route(query, retriever_scores=[0.95, 0.60])
     """
 
     def __init__(
         self,
         cost_threshold: float = 0.7,
         high_confidence_threshold: float = 0.90,
-        memory=None,  # MemoryModule（可 None）
+        memory=None,  # MemoryModule (optional)
     ) -> None:
         self.cost_threshold = cost_threshold
         self.high_conf_threshold = high_confidence_threshold
         self.memory = memory
 
     def classify_subject(self, query: str) -> SubjectCategory:
-        """基于关键词的轻量学科分类（O(1)，延迟极低）。"""
+        """Lightweight keyword subject classification (O(1))."""
         q_lower = query.lower()
         scores: dict[SubjectCategory, int] = {}
         for cat, keywords in SUBJECT_KEYWORDS.items():
@@ -100,10 +138,7 @@ class QueryRouter:
         retriever_scores: list[float],
         top_k: int = 2,
     ) -> float:
-        """
-        置信度 = top-1 分数，辅以 top-1 vs top-2 的 gap。
-        gap 越大，越确信，赋予更高置信度。
-        """
+        """Confidence from top-1 score and gap vs top-2."""
         if not retriever_scores:
             return 0.0
         sorted_scores = sorted(retriever_scores, reverse=True)
@@ -119,12 +154,12 @@ class QueryRouter:
         self,
         query: str,
         qa_key: str,
-        retriever_scores: Optional[list[float]] = None,
+        retriever_scores: list[float] | None = None,
     ) -> RoutingDecision:
-        """异步路由决策（先查缓存，再按置信度决定 mode）。"""
+        """Async route: cache first, then confidence-based mode."""
         subject = self.classify_subject(query)
 
-        # 1. 查记忆缓存
+        # 1. Memory cache
         if self.memory is not None:
             cached = await self.memory.get_result(qa_key)
             if cached is not None:
@@ -136,11 +171,11 @@ class QueryRouter:
                     cached_result=cached,
                 )
 
-        # 2. 成本感知决策
+        # 2. Cost-aware mode
         if retriever_scores:
             confidence = self.compute_confidence(retriever_scores)
         else:
-            confidence = 0.5  # 未知，保守走全流程
+            confidence = 0.5  # unknown → conservative full pipeline
 
         if confidence >= self.high_conf_threshold:
             mode = PipelineMode.RETRIEVE_ONLY

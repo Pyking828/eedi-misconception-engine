@@ -1,3 +1,3 @@
-from .synth import SynthDataGenerator, MisconceptionExpander
+from .synth import MisconceptionExpander, SynthDataGenerator
 
 __all__ = ["SynthDataGenerator", "MisconceptionExpander"]

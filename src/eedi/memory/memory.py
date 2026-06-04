@@ -1,34 +1,32 @@
 """
-感知记忆模块（上游感知记忆 + 下游缓存/反馈，复刻 JD "上游感知记忆数据"）。
+Perception memory module (query cache, sessions, feedback, hard negatives).
 
-功能：
-1. 查询缓存（qa_key → 已计算结果，TTL=24h）
-2. 会话历史（用户多轮交互记录）
-3. 用户反馈（教师/学生对诊断结果的好/差反馈）
-4. 难负例缓冲（缓存召回结果供重训时挖掘难负例）
+Features:
+1. Result cache (qa_key → ids, TTL=24h)
+2. Session history
+3. User feedback
+4. Hard-negative pool for retraining
 
-存储：aiosqlite（异步 SQLite），轻量、无需额外服务。
+Storage: aiosqlite (async SQLite), no extra service.
 """
+
 from __future__ import annotations
 
 import json
 import time
 from pathlib import Path
-from typing import Optional
 
 import aiosqlite
 
 
 class MemoryModule:
-    """
-    异步 SQLite 记忆模块。
+    """Async SQLite memory module.
 
-    示例：
-        memory = MemoryModule("/root/autodl-tmp/eedi-data/memory.db")
+    Example:
+        memory = MemoryModule("/path/to/memory.db")
         await memory.init()
         await memory.set_result(qa_key, misconception_ids)
         result = await memory.get_result(qa_key)
-        await memory.add_feedback(qa_key, user_id="teacher_1", rating=5, comment="Correct!")
     """
 
     def __init__(
@@ -38,7 +36,7 @@ class MemoryModule:
     ) -> None:
         self.db_path = str(db_path)
         self.cache_ttl_seconds = cache_ttl_hours * 3600
-        self._db: Optional[aiosqlite.Connection] = None
+        self._db: aiosqlite.Connection | None = None
 
     async def init(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -80,10 +78,10 @@ class MemoryModule:
         if self._db:
             await self._db.close()
 
-    # ── 查询缓存 ────────────────────────────────
+    # ── Result cache ──
 
-    async def get_result(self, qa_key: str) -> Optional[list[int]]:
-        """返回缓存结果（若过期则返回 None）。"""
+    async def get_result(self, qa_key: str) -> list[int] | None:
+        """Return cached ids, or None if expired."""
         async with self._db.execute(
             "SELECT result_json, created_at FROM result_cache WHERE qa_key=?",
             (qa_key,),
@@ -105,7 +103,7 @@ class MemoryModule:
         )
         await self._db.commit()
 
-    # ── 会话历史 ────────────────────────────────
+    # ── Session history ──
 
     async def log_session(
         self,
@@ -138,7 +136,7 @@ class MemoryModule:
             for r in rows
         ]
 
-    # ── 用户反馈 ────────────────────────────────
+    # ── User feedback ──
 
     async def add_feedback(
         self,
@@ -155,13 +153,11 @@ class MemoryModule:
         await self._db.commit()
 
     async def get_feedback_stats(self) -> dict:
-        async with self._db.execute(
-            "SELECT AVG(rating), COUNT(*) FROM user_feedback"
-        ) as cursor:
+        async with self._db.execute("SELECT AVG(rating), COUNT(*) FROM user_feedback") as cursor:
             row = await cursor.fetchone()
         return {"avg_rating": row[0], "total_feedback": row[1]}
 
-    # ── 难负例缓存 ────────────────────────────────
+    # ── Hard negatives ──
 
     async def update_hard_negs(self, qa_key: str, misc_id: int, score: float) -> None:
         await self._db.execute(
@@ -172,8 +168,7 @@ class MemoryModule:
 
     async def get_hard_negs(self, qa_key: str, top_k: int = 20) -> list[int]:
         async with self._db.execute(
-            "SELECT misconception_id FROM hard_neg_pool "
-            "WHERE qa_key=? ORDER BY score DESC LIMIT ?",
+            "SELECT misconception_id FROM hard_neg_pool WHERE qa_key=? ORDER BY score DESC LIMIT ?",
             (qa_key, top_k),
         ) as cursor:
             rows = await cursor.fetchall()

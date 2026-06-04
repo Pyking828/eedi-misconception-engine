@@ -1,26 +1,22 @@
 """
-精排器（Listwise Reranker）。
-模型：DeepSeek-R1-Distill-Qwen-14B + LoRA SFT → GRPO RL
-方式：一次性输入 top-N 候选，输出排序字母序列（复刻 5th place 方案）
-     或直接输出最匹配 misconception 序号（复刻 1st place listwise 思路）
-GRPO reward：nDCG 增益 / top-1 命中率
+Listwise reranker.
+
+Model: DeepSeek-R1-Distill-Qwen-14B + LoRA SFT → GRPO RL
+Inputs top-N candidates; outputs a letter ranking (5th-place style) or best index (1st-place style).
+GRPO rewards: nDCG gain / top-1 hit rate.
 """
+
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional
 
 import torch
-import torch.nn.functional as F
+from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import LoraConfig, get_peft_model, PeftModel
-
-from eval.evaluator import ndcg_at_k
-
 
 # ─────────────────────────────────────────────
-# Prompt 构建工具
+# Prompt helpers
 # ─────────────────────────────────────────────
 
 LISTWISE_SYSTEM = (
@@ -37,11 +33,9 @@ ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 def build_listwise_prompt(
     query: str,
     candidates: list[str],
-    cot_rationale: Optional[str] = None,
+    cot_rationale: str | None = None,
 ) -> str:
-    cand_str = "\n".join(
-        f"{ALPHABET[i]}. {c}" for i, c in enumerate(candidates)
-    )
+    cand_str = "\n".join(f"{ALPHABET[i]}. {c}" for i, c in enumerate(candidates))
     rationale_block = ""
     if cot_rationale:
         rationale_block = f"\nStudent reasoning analysis:\n{cot_rationale}\n"
@@ -54,8 +48,8 @@ def build_listwise_prompt(
 
 
 def parse_listwise_output(output: str, n_candidates: int) -> list[int]:
-    """解析模型输出的字母排序，返回 0-indexed 位置列表。"""
-    # 提取字母
+    """Parse letter ranking from model output; returns 0-indexed positions."""
+    # Extract letters
     letters = re.findall(r"[A-Z]", output.upper())
     seen: set[int] = set()
     ranked: list[int] = []
@@ -64,7 +58,7 @@ def parse_listwise_output(output: str, n_candidates: int) -> list[int]:
         if 0 <= idx < n_candidates and idx not in seen:
             ranked.append(idx)
             seen.add(idx)
-    # 补全未出现的候选（顺序不变）
+    # Append missing candidates in original order
     for i in range(n_candidates):
         if i not in seen:
             ranked.append(i)
@@ -72,14 +66,15 @@ def parse_listwise_output(output: str, n_candidates: int) -> list[int]:
 
 
 # ─────────────────────────────────────────────
-# ListwiseReranker：推理
+# ListwiseReranker inference
 # ─────────────────────────────────────────────
+
 
 class ListwiseReranker:
     """
-    精排：接收 top-10 候选，输出重排后 top-5 id。
+    Rerank top-10 candidates to top-5 ids.
 
-    示例：
+    Example:
         reranker = ListwiseReranker.from_pretrained(
             model_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
             adapter_path="outputs/reranker/listwise/lora_best_14b",
@@ -103,11 +98,11 @@ class ListwiseReranker:
     def from_pretrained(
         cls,
         model_name: str,
-        adapter_path: Optional[str | Path] = None,
+        adapter_path: str | Path | None = None,
         max_new_tokens: int = 128,
         device: str = "cuda",
-        cache_dir: Optional[str] = None,
-    ) -> "ListwiseReranker":
+        cache_dir: str | None = None,
+    ) -> ListwiseReranker:
         tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -129,7 +124,7 @@ class ListwiseReranker:
         candidate_ids: list[int],
         misc_texts: dict[int, str],
         top_k: int = 5,
-        cot_rationale: Optional[str] = None,
+        cot_rationale: str | None = None,
     ) -> list[int]:
         candidates = [misc_texts.get(cid, "") for cid in candidate_ids]
         prompt = build_listwise_prompt(query, candidates, cot_rationale)
@@ -158,11 +153,12 @@ class ListwiseReranker:
 
 
 # ─────────────────────────────────────────────
-# ListwiseTrainer：SFT（为 GRPO 铺垫）
+# ListwiseTrainer: SFT warm-start for GRPO
 # ─────────────────────────────────────────────
 
+
 class ListwiseTrainer:
-    """SFT 微调 listwise reranker（先于 GRPO 运行，作为冷启动）。"""
+    """SFT fine-tune listwise reranker (cold start before GRPO)."""
 
     def __init__(
         self,
@@ -170,7 +166,7 @@ class ListwiseTrainer:
         lora_r: int = 32,
         lora_alpha: int = 64,
         lora_dropout: float = 0.05,
-        cache_dir: Optional[str] = None,
+        cache_dir: str | None = None,
         output_dir: str = "outputs/reranker/listwise",
     ) -> None:
         self.output_dir = Path(output_dir)
@@ -190,7 +186,15 @@ class ListwiseTrainer:
             r=lora_r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            target_modules=[
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            ],
             bias="none",
             task_type="CAUSAL_LM",
         )
@@ -205,18 +209,18 @@ class ListwiseTrainer:
         candidate_ids: list[int],
         misc_texts: dict[int, str],
         true_id: int,
-        cot_rationale: Optional[str] = None,
+        cot_rationale: str | None = None,
     ) -> dict:
-        """构建单条 SFT 训练样本（prompt + 正确排序输出）。"""
+        """Build one SFT example (prompt + gold ranking)."""
         candidates = [misc_texts.get(cid, "") for cid in candidate_ids]
         try:
             true_idx = candidate_ids.index(true_id)
             true_letter = ALPHABET[true_idx]
         except ValueError:
-            true_letter = "A"  # 金标不在候选中，跳过（训练时过滤）
+            true_letter = "A"  # gold not in pool; filter at train time
 
         prompt = build_listwise_prompt(query, candidates, cot_rationale)
-        # 构造：金标排第一，其余按原顺序
+        # Gold first, then remaining letters in original order
         other_letters = [ALPHABET[i] for i in range(len(candidates)) if i != true_idx]
         target_output = ", ".join([true_letter] + other_letters[:4])
 
