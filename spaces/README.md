@@ -32,4 +32,6 @@ The complete system (in the GitHub repo) is a retrieve → rerank → listwise �
 
 **Final offline result:** fold0 CV **MAP@25 = 0.597** (≈ Kaggle private-LB top-3).
 
-GitHub (full code + reproduction): see the project repository.
+**GitHub (full code + reproduction):** [Pyking828/eedi-misconception-engine](https://github.com/Pyking828/eedi-misconception-engine)
+
+**Pre-trained assets (LoRA + FAISS index):** [Pyking828/eedi-misconception-engine-assets](https://huggingface.co/datasets/Pyking828/eedi-misconception-engine-assets)

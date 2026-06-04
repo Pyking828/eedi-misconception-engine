@@ -3,6 +3,7 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-green.svg)](https://fastapi.tiangolo.com/)
 [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](docker-compose.yml)
+[![HF Space](https://img.shields.io/badge/HF%20Space-live%20demo-blue.svg)](https://huggingface.co/spaces/Pyking828/eedi-misconception-demo)
 [![HF Hub](https://img.shields.io/badge/HF%20Hub-assets-yellow.svg)](https://huggingface.co/datasets/Pyking828/eedi-misconception-engine-assets)
 [![Kaggle](https://img.shields.io/badge/Kaggle-Eedi%20Misconceptions-20BEFF?logo=kaggle&logoColor=white)](https://www.kaggle.com/competitions/eedi-mining-misconceptions-in-mathematics)
 
@@ -28,14 +29,8 @@ CV MAP@25 = 0.597** (≈ Kaggle private-LB top tier; the 1st place was 0.639).
 
 Two ways to see it run:
 
-- **Zero-setup live demo (persistent):** the [`spaces/`](spaces/) folder is a ready-to-deploy
-  Hugging Face Space — a lightweight **CPU** demo (`bge-m3` + FAISS retrieval over the 2587
-  misconceptions). It needs no GPU and stays up independently of any training box.
-- **Full GPU pipeline UI (local reproduction):** run the service yourself (see
-  [Reproduce inference](#reproduce-inference)) and the Gradio UI is served at **your own**
-  `http://localhost:6006/ui`. The demo GIF above was recorded on the author's GPU instance;
-  there is intentionally **no permanently hosted full-pipeline URL** — the UI lives only for
-  as long as *you* keep the service running, so anyone can reproduce it locally.
+- **Zero-setup live demo (persistent):** **[🤗 Space — Pyking828/eedi-misconception-demo](https://huggingface.co/spaces/Pyking828/eedi-misconception-demo)** — lightweight CPU demo (`bge-m3` + FAISS retrieval over the 2587 misconceptions, precomputed embeddings for fast cold start). Stays up independently of any GPU instance.
+- **Full GPU pipeline UI (local reproduction):** run the service yourself (see [Reproduce inference](#reproduce-inference)) and the Gradio UI is served at **your own** `http://localhost:6006/ui`. The demo GIF above was recorded on the author's GPU instance; there is intentionally **no permanently hosted full-pipeline URL** — the UI lives only for as long as *you* keep the service running, so anyone can reproduce it locally.
 
 > Why this design: the heavy 8B/14B models can't run on a free CPU Space, and a personal cloud
 > GPU instance is ephemeral. So the demo is split — a persistent CPU Space for the retrieval
