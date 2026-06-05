@@ -27,10 +27,6 @@ CV MAP@25 = 0.597** (≈ Kaggle private-LB top tier; the 1st place was 0.639).
   <img src="./assets/demo/demo.gif" alt="Eedi misconception diagnosis demo" width="900"/>
 </p>
 
-<p align="center">
-  <a href="./assets/demo/demo.mp4">▶ Download / watch full-quality MP4 (1080p, 1.2 MB)</a>
-</p>
-
 Two ways to see it run:
 
 - **Zero-setup live demo (persistent):** **[🤗 Space — Pyking828/eedi-misconception-demo](https://huggingface.co/spaces/Pyking828/eedi-misconception-demo)** — lightweight CPU demo (`bge-m3` + FAISS retrieval over the 2587 misconceptions, precomputed embeddings for fast cold start). Stays up independently of any GPU instance.
