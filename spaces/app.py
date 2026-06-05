@@ -21,7 +21,7 @@ DATA_FILE = HERE / "misconceptions.txt"
 IDS_FILE = HERE / "misconception_ids.json"
 EMB_FILE = HERE / "misc_embs_bge_m3.npy"
 GITHUB_URL = os.environ.get(
-    "EEDI_GITHUB_URL", "https://github.com/your-name/eedi-misconception-engine"
+    "EEDI_GITHUB_URL", "https://github.com/Pyking828/eedi-misconception-engine"
 )
 
 

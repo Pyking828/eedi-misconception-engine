@@ -1,0 +1,39 @@
+name: Deploy to HF Space
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "spaces/**"
+      - ".github/workflows/deploy-space.yml"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push spaces/ to HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git config --global user.name "Erdeji Sun"
+          git config --global user.email "198531462+Pyking828@users.noreply.github.com"
+
+          git clone "https://Pyking828:${HF_TOKEN}@huggingface.co/spaces/Pyking828/eedi-misconception-demo" hf-space
+
+          # Sync source files; skip large binary blobs already present in the Space
+          cp spaces/app.py          hf-space/app.py
+          cp spaces/README.md       hf-space/README.md
+          cp spaces/requirements.txt hf-space/requirements.txt
+
+          cd hf-space
+          git add app.py README.md requirements.txt
+
+          if git diff --staged --quiet; then
+            echo "No changes — Space is already up to date."
+          else
+            git commit -m "sync: update Space from GitHub main"
+            git push
+          fi
