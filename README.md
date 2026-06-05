@@ -24,7 +24,11 @@ CV MAP@25 = 0.597** (≈ Kaggle private-LB top tier; the 1st place was 0.639).
 ## Demo
 
 <p align="center">
-  <img src="./assets/demo/demo.gif" alt="Eedi misconception diagnosis demo" width="640"/>
+  <img src="./assets/demo/demo.gif" alt="Eedi misconception diagnosis demo" width="900"/>
+</p>
+
+<p align="center">
+  <a href="./assets/demo/demo.mp4">▶ Download / watch full-quality MP4 (1080p, 1.2 MB)</a>
 </p>
 
 Two ways to see it run:
@@ -291,7 +295,7 @@ Stream events: `candidates` → `rationale_token` → `final`.
 ```
 eedi-misconception-engine/
 ├── assets/
-│   ├── demo/             # README demo GIF / MP4
+│   ├── demo/             # demo.gif (looping, 1080px) + demo.mp4 (1080p original)
 │   └── diagrams/         # architecture & cascade diagrams
 ├── configs/base.yaml     # paths and hyperparameters
 ├── docs/TRAINING.md      # training pipeline
